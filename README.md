@@ -5,7 +5,7 @@
 ## 0. Logistics
 **Out:** November 7, 2025  
 **Preliminary Check (required but not graded):** December 4, 2025 at 11:59pm  
-**Final Project Due:** December 11, 2025 at 11:59pm. **There will be NO late days!**  
+**Final Project Due:** December 10, 2025 at 11:59pm. **There will be NO late days!**  
 **Work in groups of 4 (minimum 3)**
 
 Please read the project description carefully. If you have any questions (e.g. clarifications about the requirements, an idea for an unlisted optimization, appointment for running on GPU nodes, etc), please **post on Ed using the new CS 5416 final project tag**
@@ -320,7 +320,7 @@ You must test on 3 machines (3 laptops or 3 ugclinux instances). That's why grou
 - **December 4** – Preliminary submission (required)
   - Used to verify we can run your code
   - No direct effect on final grade
-- **December 11** – Final project due. No late days allowed!
+- **December 10** – Final project due. No late days allowed!
 
 ## 15. What to Turn In (Checklist)
 
