@@ -424,8 +424,10 @@ def main():
     
     # Start Flask server
     print(f"\nStarting Flask server")
-    hostname = NODE_0_IP.split(':')[0]
-    port = int(NODE_0_IP.split(':')[1]) if ':' in NODE_0_IP else 8000
+    node_ips = [NODE_0_IP, NODE_1_IP, NODE_2_IP]
+    curr_node_ip = node_ips[NODE_NUMBER]
+    hostname = curr_node_ip.split(':')[0]
+    port = int(curr_node_ip.split(':')[1]) if ':' in curr_node_ip else 8000
     app.run(host=hostname, port=port, threaded=True)
 
 
