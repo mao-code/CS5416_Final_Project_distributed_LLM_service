@@ -48,7 +48,7 @@ def send_request_async(request_id: str, query: str, send_time: float):
         }
         
         start_time = time.time()
-        response = requests.post(SERVER_URL, json=payload, timeout=300)
+        response = requests.post(SERVER_URL, json=payload, timeout=600)
         elapsed_time = time.time() - start_time
         
         if response.status_code == 200:
@@ -78,7 +78,7 @@ def send_request_async(request_id: str, query: str, send_time: float):
                 }
             
     except requests.exceptions.Timeout:
-        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Request {request_id} timed out after 300s")
+        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Request {request_id} timed out after 600s")
         with results_lock:
             results[request_id] = {
                 'error': 'Timeout',

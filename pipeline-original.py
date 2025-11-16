@@ -6,10 +6,8 @@ import numpy as np
 import torch
 import faiss
 import sqlite3
-import requests
-from datetime import datetime
 from typing import List, Dict, Any
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from transformers import (
     AutoTokenizer,
     AutoModel,
@@ -64,10 +62,10 @@ class PipelineResponse:
     is_toxic: str
     processing_time: float
 
-class Node0Work:
+class MonolithicPipeline:
 
     """
-    Node 0's work
+    Deliberately inefficient monolithic pipeline
     """
     
     def __init__(self):
@@ -92,93 +90,27 @@ class Node0Work:
         responses = self.process_batch([request])
         return responses[0]
 
-    def process_batch(self, incoming_requests: List[PipelineRequest]):
+    def process_batch(self, requests: List[PipelineRequest]) -> List[PipelineResponse]:
         """
-        Pipeline starts and ends here
+        Main pipeline execution for a batch of requests.
         """
-        if not incoming_requests:
+        if not requests:
             return []
 
-        batch_size = len(incoming_requests)
-        start_times = [time.time() for _ in incoming_requests]
-        queries = [req.query for req in incoming_requests]
+        batch_size = len(requests)
+        start_times = [time.time() for _ in requests]
+        queries = [req.query for req in requests]
 
         print("\n" + "="*60)
         print(f"Processing batch of {batch_size} requests")
         print("="*60)
-        for request in incoming_requests:
+        for request in requests:
             print(f"- {request.request_id}: {request.query[:50]}...")
         
         # Step 1: Generate embeddings
         print("\n[Step 1/7] Generating embeddings for batch...")
         query_embeddings = self._generate_embeddings_batch(queries)
 
-        payload = {
-            'query_embeddings': query_embeddings.tolist(),
-            'queries': queries,
-        }
-        reranked_docs_batch = None
-        try:
-            # send query_embeddings and queries to node 1
-            response = requests.post(f"http://{NODE_1_IP}/context-retrieval", json=payload, timeout=300)
-            reranked_docs_batch = response.json()
-        except Exception as e:
-            print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Error for sending query_embeddings to node 1: {str(e)}")
-
-        json_requests = [asdict(request) for request in incoming_requests]
-        payload = {
-            'requests': json_requests,
-            'queries': queries,
-            'reranked_docs_batch': reranked_docs_batch,
-            'start_times': start_times
-        }
-        
-        try:
-            request_response = requests.post(f"http://{NODE_2_IP}/context-retrieval", json=payload, timeout=300)
-            responses = [PipelineResponse(**response) for response in request_response.json()]
-            return responses
-        except Exception as e:
-            print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Error for sending  to node 2: {str(e)}")
-            return []
-        
-    
-    def _generate_embeddings_batch(self, texts: List[str]) -> np.ndarray:
-        """Step 2: Generate embeddings for a batch of queries"""
-        model = SentenceTransformer(self.embedding_model_name).to(self.device)
-        embeddings = model.encode(
-            texts,
-            normalize_embeddings=True,
-            convert_to_numpy=True
-        )
-        del model
-        gc.collect()
-        return embeddings
-    
-class Node1Work:
-
-    """
-    Node 1's Work
-    """
-    
-    def __init__(self):
-        self.device = torch.device('cpu')
-        print(f"Initializing pipeline on {self.device}")
-        print(f"Node {NODE_NUMBER}/{TOTAL_NODES}")
-        print(f"FAISS index path: {CONFIG['faiss_index_path']}")
-        print(f"Documents path: {CONFIG['documents_path']}")
-        
-        # Model names
-        self.embedding_model_name = 'BAAI/bge-base-en-v1.5'
-        self.reranker_model_name = 'BAAI/bge-reranker-base'
-        self.llm_model_name = 'Qwen/Qwen2.5-0.5B-Instruct'
-        self.sentiment_model_name = 'nlptown/bert-base-multilingual-uncased-sentiment'
-        self.safety_model_name = 'unitary/toxic-bert'
-    
-
-    def process_batch(self, query_embeddings: np.ndarray, queries: List[str]) -> List[List[Dict]]:
-        """
-        Node 1's pipeline execution for a batch of requests. 
-        """
         # Step 2: FAISS ANN search
         print("\n[Step 2/7] Performing FAISS ANN search for batch...")
         doc_id_batches = self._faiss_search_batch(query_embeddings)
@@ -194,7 +126,47 @@ class Node1Work:
             documents_batch
         )
 
-        return reranked_docs_batch
+        # Step 5: Generate LLM responses
+        print("\n[Step 5/7] Generating LLM responses for batch...")
+        responses_text = self._generate_responses_batch(
+            queries,
+            reranked_docs_batch
+        )
+
+        # Step 6: Sentiment analysis
+        print("\n[Step 6/7] Analyzing sentiment for batch...")
+        sentiments = self._analyze_sentiment_batch(responses_text)
+
+        # Step 7: Safety filter on responses
+        print("\n[Step 7/7] Applying safety filter to batch...")
+        toxicity_flags = self._filter_response_safety_batch(responses_text)
+        
+        responses = []
+        for idx, request in enumerate(requests):
+            processing_time = time.time() - start_times[idx]
+            print(f"\n✓ Request {request.request_id} processed in {processing_time:.2f} seconds")
+            sensitivity_result = "true" if toxicity_flags[idx] else "false"
+            responses.append(PipelineResponse(
+                request_id=request.request_id,
+                generated_response=responses_text[idx],
+                sentiment=sentiments[idx],
+                is_toxic=sensitivity_result,
+                processing_time=processing_time
+            ))
+        
+        return responses
+    
+    def _generate_embeddings_batch(self, texts: List[str]) -> np.ndarray:
+        """Step 2: Generate embeddings for a batch of queries"""
+        model = SentenceTransformer(self.embedding_model_name).to(self.device)
+        embeddings = model.encode(
+            texts,
+            normalize_embeddings=True,
+            convert_to_numpy=True
+        )
+        del model
+        gc.collect()
+        return embeddings
     
     def _faiss_search_batch(self, query_embeddings: np.ndarray) -> List[List[int]]:
         """Step 3: Perform FAISS ANN search for a batch of embeddings"""
@@ -260,61 +232,6 @@ class Node1Work:
         del model, tokenizer
         gc.collect()
         return reranked_batches
-
-
-class Node2Work:
-
-    """
-    Node 2's work
-    """
-    
-    def __init__(self):
-        self.device = torch.device('cpu')
-        print(f"Initializing pipeline on {self.device}")
-        print(f"Node {NODE_NUMBER}/{TOTAL_NODES}")
-        print(f"FAISS index path: {CONFIG['faiss_index_path']}")
-        print(f"Documents path: {CONFIG['documents_path']}")
-        
-        # Model names
-        self.embedding_model_name = 'BAAI/bge-base-en-v1.5'
-        self.reranker_model_name = 'BAAI/bge-reranker-base'
-        self.llm_model_name = 'Qwen/Qwen2.5-0.5B-Instruct'
-        self.sentiment_model_name = 'nlptown/bert-base-multilingual-uncased-sentiment'
-        self.safety_model_name = 'unitary/toxic-bert'
-
-    def process_batch(self, requests: List[PipelineRequest], queries: List[str], reranked_docs_batch: List[List[Dict]], start_times: list[float]) -> List[PipelineResponse]:
-        """
-        Node 2's pipeline execution for a batch of requests. 
-        """
-        # Step 5: Generate LLM responses
-        print("\n[Step 5/7] Generating LLM responses for batch...")
-        responses_text = self._generate_responses_batch(
-            queries,
-            reranked_docs_batch
-        )
-
-        # Step 6: Sentiment analysis
-        print("\n[Step 6/7] Analyzing sentiment for batch...")
-        sentiments = self._analyze_sentiment_batch(responses_text)
-
-        # Step 7: Safety filter on responses
-        print("\n[Step 7/7] Applying safety filter to batch...")
-        toxicity_flags = self._filter_response_safety_batch(responses_text)
-        
-        responses = []
-        for idx, request in enumerate(requests):
-            processing_time = time.time() - start_times[idx]
-            print(f"\n✓ Request {request.request_id} processed in {processing_time:.2f} seconds")
-            sensitivity_result = "true" if toxicity_flags[idx] else "false"
-            responses.append(PipelineResponse(
-                request_id=request.request_id,
-                generated_response=responses_text[idx],
-                sentiment=sentiments[idx],
-                is_toxic=sensitivity_result,
-                processing_time=processing_time
-            ))
-        
-        return responses
     
     def _generate_responses_batch(self, queries: List[str], documents_batch: List[List[Dict]]) -> List[str]:
         """Step 6: Generate LLM responses for each query in the batch"""
@@ -391,7 +308,7 @@ class Node2Work:
         del classifier
         gc.collect()
         return toxicity_flags
-    
+
 
 # Global pipeline instance
 pipeline = None
@@ -430,42 +347,6 @@ def process_requests_worker():
             request_queue.task_done()
 
 
-# Node 1 begins it's stages here because node 0 was like hi plz do this
-@app.route('/context-retrieval', methods=['POST'])
-def handle_handover():
-    """Handle node 0 -> node 1 handover"""
-    try:
-        if NODE_NUMBER == 1:
-            data = request.json
-            query_embeddings = data.get('query_embeddings')
-            queries = data.get('queries')
-            
-            if not query_embeddings or not queries:
-                return jsonify({'error': 'Missing information'}), 400
-            
-            query_embeddings = np.array(query_embeddings, dtype=np.float32)
-            
-            reranked_docs_batch = pipeline.process_batch(query_embeddings, queries) # we will return this result to node 0
-            return jsonify(reranked_docs_batch), 200
-        elif NODE_NUMBER == 2:
-            data = request.json
-            requests_json = data.get('requests')
-            queries = data.get('queries')
-            reranked_docs_batch = data.get('reranked_docs_batch')
-            start_times = data.get('start_times')
-                        
-            if not requests_json or not queries or not reranked_docs_batch or not start_times:
-                return jsonify({'error': 'Missing information'}), 400
-            
-            request_list = [PipelineRequest(**request) for request in requests_json]
-            responses = pipeline.process_batch(request_list, queries, reranked_docs_batch, start_times)
-            responses_json = [asdict(response) for response in responses] # response will be returned to node 0
-            return jsonify(responses_json), 200
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-    
-
-
 @app.route('/query', methods=['POST'])
 def handle_query():
     """Handle incoming query requests"""
@@ -490,7 +371,7 @@ def handle_query():
         })
 
         # Wait for processing (with timeout). Very inefficient - would suggest using a more efficient waiting and timeout mechanism.
-        timeout = 600  # 10 minutes
+        timeout = 300  # 5 minutes
         start_wait = time.time()
         while True:
             with results_lock:
@@ -530,32 +411,21 @@ def main():
     print(f"Node IPs: 0={NODE_0_IP}, 1={NODE_1_IP}, 2={NODE_2_IP}")
     print("\nNOTE: This implementation is deliberately inefficient.")
     print("Your task is to optimize this for a 3-node cluster.\n")
-
-    worker_thread = None
     
     # Initialize pipeline
     print("Initializing pipeline...")
-    if NODE_NUMBER == 0:
-        pipeline = Node0Work()
-
-        # Start worker thread
-        worker_thread = threading.Thread(target=process_requests_worker, daemon=True)
-        worker_thread.start()
-        print("Worker thread started!")
-
-    elif NODE_NUMBER == 1:
-        pipeline = Node1Work()
-    else:
-        pipeline = Node2Work()
+    pipeline = MonolithicPipeline()
     print("Pipeline initialized!")
     
+    # Start worker thread
+    worker_thread = threading.Thread(target=process_requests_worker, daemon=True)
+    worker_thread.start()
+    print("Worker thread started!")
     
     # Start Flask server
     print(f"\nStarting Flask server")
-    node_ips = [NODE_0_IP, NODE_1_IP, NODE_2_IP]
-    curr_node_ip = node_ips[NODE_NUMBER]
-    hostname = curr_node_ip.split(':')[0]
-    port = int(curr_node_ip.split(':')[1]) if ':' in curr_node_ip else 8000
+    hostname = NODE_0_IP.split(':')[0]
+    port = int(NODE_0_IP.split(':')[1]) if ':' in NODE_0_IP else 8000
     app.run(host=hostname, port=port, threaded=True)
 
 
