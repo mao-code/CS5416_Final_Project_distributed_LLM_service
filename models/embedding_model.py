@@ -3,7 +3,7 @@ import numpy
 
 @dataclass
 class EmbeddingsRequest:
-    query: list[str]
+    queries: list[str]
 
 @dataclass
 class EmbeddingsResponse:

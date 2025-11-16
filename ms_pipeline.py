@@ -20,6 +20,7 @@ from sentence_transformers import SentenceTransformer
 from flask import Flask, request, jsonify
 from queue import Queue
 import threading
+import requests as http_requests
 from embedding import (EmbeddingNode, EmbeddingsRequest, EmbeddingsResponse)
 
 # Read environment variables
@@ -112,8 +113,7 @@ class MonolithicPipeline:
         print("\n[Step 1/7] Generating embeddings for batch...")
         start = time.time()
         embedding_requests = json.dumps(queries)
-        print(embedding_requests)
-        query_embeddings = requests.post(f"http://{NODE_1_IP}/embedding", data=EmbeddingsRequest(queries), timeout=300)
+        query_embeddings = http_requests.post(f"http://{NODE_1_IP}/embedding", data=embedding_requests, timeout=300)
         # query_embeddings = self._generate_embeddings_batch(queries)
         print("Embeddings time:", time.time() - start)
 

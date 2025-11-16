@@ -42,7 +42,7 @@ class EmbeddingNode:
         
         self.embedding_model_name = 'BAAI/bge-base-en-v1.5'
     
-    def process_request(self, request: EmbeddingsRequest) -> EmbeddingsResponse:
+    def process_request(self, request: list[str]) -> EmbeddingsResponse:
         """
         Backwards-compatible single-request entry point that delegates
         to the batch processor with a batch size of 1.
