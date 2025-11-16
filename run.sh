@@ -4,4 +4,4 @@
 # This script will be executed on each node
 
 echo "Starting pipeline on Node $NODE_NUMBER..."
-python3 pipeline.py
+python3 ms_pipeline.py
