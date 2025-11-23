@@ -1,6 +1,4 @@
 import asyncio
-import csv
-import os
 import sqlite3
 import time
 from typing import List
@@ -15,7 +13,7 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from .config import Settings
 from .models import GenerationBatch, GenerationItem, RetrievalBatch, RetrievalItem
-from .utils import opportunistic_batch, resolve_device
+from .utils import opportunistic_batch, resolve_device, write_metrics_row
 
 
 class RetrievalProcessor:
@@ -210,64 +208,51 @@ def _log_metrics(state: Node1State, generation_batch: List[GenerationItem]) -> N
     if not state.settings.metrics_enabled or not generation_batch:
         return
     path = state.settings.metrics_csv_path
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    write_header = not os.path.exists(path)
-    fieldnames = [
-        "request_id",
-        "start_time",
-        "retrieval_finished_at",
-        "generation_finished_at",
-        "retrieval_duration",
-        "generation_duration",
-        "total_processing_time",
-        "sentiment",
-        "is_toxic",
-        "node_number",
-        "stage_embeddings",
-        "stage_faiss_search",
-        "stage_fetch_documents",
-        "stage_rerank",
-        "stage_generate",
-        "stage_sentiment",
-        "stage_safety_filter",
-        "node_latency",
-        "node_throughput_rps",
-    ]
-    try:
-        with open(path, "a", newline="") as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            if write_header:
-                writer.writeheader()
-            for item in generation_batch:
-                retrieval_duration = None
-                total_processing_time = None
-                if item.retrieval_finished_at:
-                    retrieval_duration = item.retrieval_finished_at - item.start_time
-                    total_processing_time = retrieval_duration
-                node_latency = retrieval_duration
-                node_throughput = (1.0 / node_latency) if node_latency else None
-                writer.writerow(
-                    {
-                        "request_id": item.request_id,
-                        "start_time": item.start_time,
-                        "retrieval_finished_at": item.retrieval_finished_at,
-                        "generation_finished_at": None,
-                        "retrieval_duration": retrieval_duration,
-                        "generation_duration": None,
-                        "total_processing_time": total_processing_time,
-                        "sentiment": "",
-                        "is_toxic": "",
-                        "node_number": state.settings.node_number,
-                        "stage_embeddings": item.stage_embeddings,
-                        "stage_faiss_search": item.stage_faiss_search,
-                        "stage_fetch_documents": item.stage_fetch_documents,
-                        "stage_rerank": item.stage_rerank,
-                        "stage_generate": None,
-                        "stage_sentiment": None,
-                        "stage_safety_filter": None,
-                        "node_latency": node_latency,
-                        "node_throughput_rps": node_throughput,
-                    }
-                )
-    except Exception:
-        return
+    for item in generation_batch:
+        retrieval_duration = None
+        if item.retrieval_finished_at:
+            retrieval_duration = item.retrieval_finished_at - item.start_time
+        elif all(
+            stage is not None
+            for stage in [
+                item.stage_embeddings,
+                item.stage_faiss_search,
+                item.stage_fetch_documents,
+                item.stage_rerank,
+            ]
+        ):
+            retrieval_duration = (
+                item.stage_embeddings
+                + item.stage_faiss_search
+                + item.stage_fetch_documents
+                + item.stage_rerank
+            )
+
+        node_latency = retrieval_duration
+        node_throughput = (1.0 / node_latency) if node_latency else None
+
+        row = {
+            "request_id": item.request_id,
+            "start_time": item.start_time,
+            "retrieval_finished_at": item.retrieval_finished_at,
+            "generation_finished_at": None,
+            "retrieval_duration": retrieval_duration,
+            "generation_duration": None,
+            "total_processing_time": retrieval_duration,
+            "sentiment": "",
+            "is_toxic": "",
+            "node_number": state.settings.node_number,
+            "stage_embeddings": item.stage_embeddings,
+            "stage_faiss_search": item.stage_faiss_search,
+            "stage_fetch_documents": item.stage_fetch_documents,
+            "stage_rerank": item.stage_rerank,
+            "stage_generate": None,
+            "stage_sentiment": None,
+            "stage_safety_filter": None,
+            "node_latency": node_latency,
+            "node_throughput_rps": node_throughput,
+        }
+        try:
+            write_metrics_row(path, row)
+        except Exception:
+            continue

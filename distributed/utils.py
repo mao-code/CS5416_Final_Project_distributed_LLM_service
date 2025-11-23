@@ -1,4 +1,6 @@
 import asyncio
+import csv
+import os
 import time
 from typing import Iterable, List, Sequence, TypeVar
 
@@ -42,3 +44,37 @@ def resolve_device(prefer_gpu: bool, only_cpu: bool = False) -> torch.device:
 def chunked(seq: Sequence[T], size: int) -> Iterable[Sequence[T]]:
     for idx in range(0, len(seq), size):
         yield seq[idx : idx + size]
+
+
+# Timing logic helpers (new)
+METRIC_FIELDNAMES = [
+    "request_id",
+    "start_time",
+    "retrieval_finished_at",
+    "generation_finished_at",
+    "retrieval_duration",
+    "generation_duration",
+    "total_processing_time",
+    "sentiment",
+    "is_toxic",
+    "node_number",
+    "stage_embeddings",
+    "stage_faiss_search",
+    "stage_fetch_documents",
+    "stage_rerank",
+    "stage_generate",
+    "stage_sentiment",
+    "stage_safety_filter",
+    "node_latency",
+    "node_throughput_rps",
+]
+
+
+def write_metrics_row(path: str, row: dict) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    write_header = not os.path.exists(path)
+    with open(path, "a", newline="") as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=METRIC_FIELDNAMES)
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)

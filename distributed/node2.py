@@ -1,6 +1,4 @@
 import asyncio
-import csv
-import os
 import sqlite3
 import time
 from typing import Dict, List
@@ -12,7 +10,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline as hf_pip
 
 from .config import Settings
 from .models import GenerationBatch, GenerationItem, PipelineResult, ResultBatch
-from .utils import chunked, opportunistic_batch, resolve_device
+from .utils import chunked, opportunistic_batch, resolve_device, write_metrics_row
 
 
 class GenerationProcessor:
@@ -199,38 +197,12 @@ class GenerationProcessor:
         if not self.settings.metrics_enabled or not rows:
             return
         path = self.settings.metrics_csv_path
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        write_header = not os.path.exists(path)
-        fieldnames = [
-            "request_id",
-            "start_time",
-            "retrieval_finished_at",
-            "generation_finished_at",
-            "retrieval_duration",
-            "generation_duration",
-            "total_processing_time",
-            "sentiment",
-            "is_toxic",
-            "node_number",
-            "stage_embeddings",
-            "stage_faiss_search",
-            "stage_fetch_documents",
-            "stage_rerank",
-            "stage_generate",
-            "stage_sentiment",
-            "stage_safety_filter",
-            "node_latency",
-            "node_throughput_rps",
-        ]
-        try:
-            with open(path, "a", newline="") as csvfile:
-                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                if write_header:
-                    writer.writeheader()
-                writer.writerows(rows)
-        except Exception:
-            # Logging should never break the main pipeline
-            return
+        for row in rows:
+            try:
+                write_metrics_row(path, row)
+            except Exception:
+                # Logging should never break the main pipeline
+                continue
 
 
 class Node2State:

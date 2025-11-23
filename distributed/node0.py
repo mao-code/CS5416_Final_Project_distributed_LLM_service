@@ -1,7 +1,5 @@
 # Use asyncio to have non-blocking thread, event-loop to achieve high concurrency
 import asyncio
-import csv
-import os
 import time
 from typing import Dict
 
@@ -16,7 +14,7 @@ from .models import (
     RetrievalItem,
     ResultBatch,
 )
-from .utils import opportunistic_batch
+from .utils import opportunistic_batch, write_metrics_row
 
 
 class Node0State:
@@ -94,7 +92,7 @@ def build_app(settings: Settings) -> FastAPI:
         return PipelineResult(**result)
 
     @app.post("/result")
-async def result(batch: ResultBatch) -> dict:
+    async def result(batch: ResultBatch) -> dict:
         delivered = 0
         async with state.pending_lock:
             for res in batch.results:
@@ -120,64 +118,62 @@ def _log_metrics(state: Node0State, res: PipelineResult) -> None:
     if not state.settings.metrics_enabled:
         return
     path = state.settings.metrics_csv_path
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    write_header = not os.path.exists(path)
-    fieldnames = [
-        "request_id",
-        "start_time",
-        "retrieval_finished_at",
-        "generation_finished_at",
-        "retrieval_duration",
-        "generation_duration",
-        "total_processing_time",
-        "sentiment",
-        "is_toxic",
-        "node_number",
-        "stage_embeddings",
-        "stage_faiss_search",
-        "stage_fetch_documents",
-        "stage_rerank",
-        "stage_generate",
-        "stage_sentiment",
-        "stage_safety_filter",
-        "node_latency",
-        "node_throughput_rps",
-    ]
+    stage_sum = lambda names: sum(  # noqa: E731
+        v for v in (getattr(res, name, None) for name in names) if v is not None
+    )
+
+    retrieval_duration = res.retrieval_duration
+    if retrieval_duration is None:
+        retrieval_duration = stage_sum(
+            ["stage_embeddings", "stage_faiss_search", "stage_fetch_documents", "stage_rerank"]
+        ) or None
+
+    generation_duration = res.generation_duration
+    if generation_duration is None and res.generation_finished_at and res.retrieval_finished_at:
+        generation_duration = res.generation_finished_at - res.retrieval_finished_at
+    if generation_duration is None:
+        generation_duration = stage_sum(
+            ["stage_generate", "stage_sentiment", "stage_safety_filter"]
+        ) or None
+
+    total_processing_time = res.processing_time
+    if total_processing_time is None and res.start_time and res.generation_finished_at:
+        total_processing_time = res.generation_finished_at - res.start_time
+
+    retrieval_finished_at = res.retrieval_finished_at
+    if retrieval_finished_at is None and res.start_time and retrieval_duration:
+        retrieval_finished_at = res.start_time + retrieval_duration
+
+    generation_finished_at = res.generation_finished_at
+    if generation_finished_at is None and res.start_time and total_processing_time:
+        generation_finished_at = res.start_time + total_processing_time
+
+    node_latency = total_processing_time
+    node_throughput = (1.0 / node_latency) if node_latency else None
+
+    row = {
+        "request_id": res.request_id,
+        "start_time": res.start_time,
+        "retrieval_finished_at": retrieval_finished_at,
+        "generation_finished_at": generation_finished_at,
+        "retrieval_duration": retrieval_duration,
+        "generation_duration": generation_duration,
+        "total_processing_time": total_processing_time,
+        "sentiment": res.sentiment,
+        "is_toxic": res.is_toxic,
+        "node_number": state.settings.node_number,
+        "stage_embeddings": getattr(res, "stage_embeddings", None),
+        "stage_faiss_search": getattr(res, "stage_faiss_search", None),
+        "stage_fetch_documents": getattr(res, "stage_fetch_documents", None),
+        "stage_rerank": getattr(res, "stage_rerank", None),
+        "stage_generate": getattr(res, "stage_generate", None),
+        "stage_sentiment": getattr(res, "stage_sentiment", None),
+        "stage_safety_filter": getattr(res, "stage_safety_filter", None),
+        "node_latency": node_latency,
+        "node_throughput_rps": node_throughput,
+    }
+
     try:
-        start_time = res.start_time
-        total_processing_time = res.processing_time
-        node_latency = None
-        if start_time and res.generation_finished_at:
-            node_latency = res.generation_finished_at - start_time
-        elif total_processing_time:
-            node_latency = total_processing_time
-        node_throughput = (1.0 / node_latency) if node_latency else None
-        with open(path, "a", newline="") as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            if write_header:
-                writer.writeheader()
-            writer.writerow(
-                {
-                    "request_id": res.request_id,
-                    "start_time": start_time,
-                    "retrieval_finished_at": res.retrieval_finished_at,
-                    "generation_finished_at": res.generation_finished_at,
-                    "retrieval_duration": res.retrieval_duration,
-                    "generation_duration": res.generation_duration,
-                    "total_processing_time": total_processing_time,
-                    "sentiment": res.sentiment,
-                    "is_toxic": res.is_toxic,
-                    "node_number": state.settings.node_number,
-                    "stage_embeddings": getattr(res, "stage_embeddings", None),
-                    "stage_faiss_search": getattr(res, "stage_faiss_search", None),
-                    "stage_fetch_documents": getattr(res, "stage_fetch_documents", None),
-                    "stage_rerank": getattr(res, "stage_rerank", None),
-                    "stage_generate": getattr(res, "stage_generate", None),
-                    "stage_sentiment": getattr(res, "stage_sentiment", None),
-                    "stage_safety_filter": getattr(res, "stage_safety_filter", None),
-                    "node_latency": node_latency,
-                    "node_throughput_rps": node_throughput,
-                }
-            )
+        write_metrics_row(path, row)
     except Exception:
         return

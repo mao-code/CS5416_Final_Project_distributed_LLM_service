@@ -9,6 +9,7 @@ import os
 import time
 import requests
 import json
+import csv  # Timing logic (new)
 import threading
 from datetime import datetime
 from typing import Dict, Optional
@@ -16,6 +17,7 @@ from typing import Dict, Optional
 # Read NODE_0_IP from environment variable
 NODE_0_IP = os.environ.get('NODE_0_IP', 'localhost:8000')
 SERVER_URL = f"http://{NODE_0_IP}/query"
+METRICS_CSV_PATH = os.environ.get('METRICS_CSV_PATH', 'mao_request_timings.csv')  # Timing logic (new)
 
 # Test queries
 TEST_QUERIES = [
@@ -48,7 +50,7 @@ def send_request_async(request_id: str, query: str, send_time: float):
         }
         
         start_time = time.time()
-        response = requests.post(SERVER_URL, json=payload, timeout=600)
+        response = requests.post(SERVER_URL, json=payload, timeout=300)
         elapsed_time = time.time() - start_time
         
         if response.status_code == 200:
@@ -78,7 +80,7 @@ def send_request_async(request_id: str, query: str, send_time: float):
                 }
             
     except requests.exceptions.Timeout:
-        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Request {request_id} timed out after 600s")
+        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Request {request_id} timed out after 300s")
         with results_lock:
             results[request_id] = {
                 'error': 'Timeout',
@@ -101,6 +103,60 @@ def send_request_async(request_id: str, query: str, send_time: float):
                 'send_time': send_time,
                 'success': False
             }
+
+
+# Timing logic (new): helper to parse floats safely from CSV
+def _safe_float(val: Optional[str]) -> Optional[float]:
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
+# Timing logic (new): summarize per-node latency/throughput from metrics CSV
+def _print_node_metrics_summary():
+    if not os.path.exists(METRICS_CSV_PATH):
+        print(f"\nMetrics file not found at {METRICS_CSV_PATH}, skipping node summary.")
+        return
+
+    node_stats: Dict[int, Dict[str, float]] = {}
+    try:
+        with open(METRICS_CSV_PATH, newline='') as csvfile:
+            reader = csv.DictReader(csvfile)
+            for row in reader:
+                node_raw = row.get('node_number')
+                try:
+                    node_id = int(node_raw)
+                except (TypeError, ValueError):
+                    continue
+                latency = _safe_float(row.get('node_latency'))
+                throughput = _safe_float(row.get('node_throughput_rps'))
+                stats = node_stats.setdefault(
+                    node_id,
+                    {'lat_sum': 0.0, 'lat_count': 0, 'thr_sum': 0.0, 'thr_count': 0}
+                )
+                if latency is not None:
+                    stats['lat_sum'] += latency
+                    stats['lat_count'] += 1
+                if throughput is not None:
+                    stats['thr_sum'] += throughput
+                    stats['thr_count'] += 1
+    except Exception as exc:
+        print(f"\nUnable to read metrics file {METRICS_CSV_PATH}: {exc}")
+        return
+
+    if not node_stats:
+        print(f"\nNo node metrics available in {METRICS_CSV_PATH}.")
+        return
+
+    print("\nAverage node latency/throughput (from metrics CSV):")
+    for node_id in sorted(node_stats.keys()):
+        stats = node_stats[node_id]
+        avg_latency = (stats['lat_sum'] / stats['lat_count']) if stats['lat_count'] else None
+        avg_throughput = (stats['thr_sum'] / stats['thr_count']) if stats['thr_count'] else None
+        latency_display = f"{avg_latency:.3f}s" if avg_latency is not None else "n/a"
+        throughput_display = f"{avg_throughput:.3f} req/s" if avg_throughput is not None else "n/a"
+        print(f" - Node {node_id}: latency={latency_display}, throughput={throughput_display}")
 
 
 def main():
@@ -160,9 +216,11 @@ def main():
         threads.append(thread)
     
     # Wait for all threads to complete (with a reasonable timeout)
-    print(f"\n\nWaiting for all responses (up to 5 minutes)...")
+    # print(f"\n\nWaiting for all responses (up to 5 minutes)...")
+    print(f"\n\nWaiting for all responses (up to 10 minutes)...")
     for thread in threads:
-        thread.join(timeout=320)  # 5 min 20 sec to allow for some buffer
+        # thread.join(timeout=320)  # 5 min 20 sec to allow for some buffer
+        thread.join(timeout=620)  # 10 min 20 sec to allow for some buffer
     
     # Print summary
     total_time = time.time() - start_time
@@ -201,6 +259,7 @@ def main():
                         print(f"\n{i}. Request ID: {req_id}")
                         print(f"   ⏳ Still pending or not received")
     
+    _print_node_metrics_summary()  # Timing logic (new)
     print("\n" + "="*70)
 
 

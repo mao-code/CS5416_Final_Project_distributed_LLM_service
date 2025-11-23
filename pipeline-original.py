@@ -30,6 +30,28 @@ NODE_1_IP = os.environ.get('NODE_1_IP', 'localhost:8000')
 NODE_2_IP = os.environ.get('NODE_2_IP', 'localhost:8000')
 FAISS_INDEX_PATH = os.environ.get('FAISS_INDEX_PATH', 'faiss_index.bin')
 DOCUMENTS_DIR = os.environ.get('DOCUMENTS_DIR', 'documents/')
+METRICS_CSV_PATH = os.environ.get('METRICS_CSV_PATH', 'mao_request_timings.csv')  # Timing logic path (new)
+METRIC_FIELDNAMES = [
+    "request_id",
+    "start_time",
+    "retrieval_finished_at",
+    "generation_finished_at",
+    "retrieval_duration",
+    "generation_duration",
+    "total_processing_time",
+    "sentiment",
+    "is_toxic",
+    "node_number",
+    "stage_embeddings",
+    "stage_faiss_search",
+    "stage_fetch_documents",
+    "stage_rerank",
+    "stage_generate",
+    "stage_sentiment",
+    "stage_safety_filter",
+    "node_latency",
+    "node_throughput_rps",
+]  # Timing logic header (new)
 
 # Configuration
 CONFIG = {
@@ -40,7 +62,6 @@ CONFIG = {
     'retrieval_k': 10, #You must retrieve this many documents from the FAISS index
     'truncate_length': 512 # You must use this truncate length
 }
-METRICS_CSV_PATH = os.environ.get("METRICS_CSV_PATH", "original_request_timings.csv")
 
 # Flask app
 app = Flask(__name__)
@@ -99,13 +120,10 @@ class MonolithicPipeline:
         if not requests:
             return []
 
-        batch_start = time.time()
-        stage_timings = []
-        stage_end_times: Dict[str, float] = {}
-
         batch_size = len(requests)
         start_times = [time.time() for _ in requests]
         queries = [req.query for req in requests]
+        stage_timings = {}  # Timing logic: track per-stage durations (new)
 
         print("\n" + "="*60)
         print(f"Processing batch of {batch_size} requests")
@@ -114,59 +132,52 @@ class MonolithicPipeline:
             print(f"- {request.request_id}: {request.query[:50]}...")
         
         # Step 1: Generate embeddings
-        step_start = time.time()
         print("\n[Step 1/7] Generating embeddings for batch...")
+        step_start = time.time()  # Timing logic (new)
         query_embeddings = self._generate_embeddings_batch(queries)
-        stage_timings.append(("embeddings", time.time() - step_start))
-        stage_end_times["embeddings"] = time.time()
+        stage_timings['stage_embeddings'] = time.time() - step_start  # Timing logic (new)
 
         # Step 2: FAISS ANN search
-        step_start = time.time()
         print("\n[Step 2/7] Performing FAISS ANN search for batch...")
+        step_start = time.time()  # Timing logic (new)
         doc_id_batches = self._faiss_search_batch(query_embeddings)
-        stage_timings.append(("faiss_search", time.time() - step_start))
-        stage_end_times["faiss_search"] = time.time()
+        stage_timings['stage_faiss_search'] = time.time() - step_start  # Timing logic (new)
 
         # Step 3: Fetch documents from disk
-        step_start = time.time()
         print("\n[Step 3/7] Fetching documents for batch...")
+        step_start = time.time()  # Timing logic (new)
         documents_batch = self._fetch_documents_batch(doc_id_batches)
-        stage_timings.append(("fetch_documents", time.time() - step_start))
-        stage_end_times["fetch_documents"] = time.time()
+        stage_timings['stage_fetch_documents'] = time.time() - step_start  # Timing logic (new)
 
         # Step 4: Rerank documents
-        step_start = time.time()
         print("\n[Step 4/7] Reranking documents for batch...")
+        step_start = time.time()  # Timing logic (new)
         reranked_docs_batch = self._rerank_documents_batch(
             queries,
             documents_batch
         )
-        stage_timings.append(("rerank", time.time() - step_start))
-        stage_end_times["rerank"] = time.time()
+        stage_timings['stage_rerank'] = time.time() - step_start  # Timing logic (new)
 
         # Step 5: Generate LLM responses
-        step_start = time.time()
         print("\n[Step 5/7] Generating LLM responses for batch...")
+        step_start = time.time()  # Timing logic (new)
         responses_text = self._generate_responses_batch(
             queries,
             reranked_docs_batch
         )
-        stage_timings.append(("generate", time.time() - step_start))
-        stage_end_times["generate"] = time.time()
+        stage_timings['stage_generate'] = time.time() - step_start  # Timing logic (new)
 
         # Step 6: Sentiment analysis
-        step_start = time.time()
         print("\n[Step 6/7] Analyzing sentiment for batch...")
+        step_start = time.time()  # Timing logic (new)
         sentiments = self._analyze_sentiment_batch(responses_text)
-        stage_timings.append(("sentiment", time.time() - step_start))
-        stage_end_times["sentiment"] = time.time()
+        stage_timings['stage_sentiment'] = time.time() - step_start  # Timing logic (new)
 
         # Step 7: Safety filter on responses
-        step_start = time.time()
         print("\n[Step 7/7] Applying safety filter to batch...")
+        step_start = time.time()  # Timing logic (new)
         toxicity_flags = self._filter_response_safety_batch(responses_text)
-        stage_timings.append(("safety_filter", time.time() - step_start))
-        stage_end_times["safety_filter"] = time.time()
+        stage_timings['stage_safety_filter'] = time.time() - step_start  # Timing logic (new)
         
         responses = []
         for idx, request in enumerate(requests):
@@ -180,83 +191,81 @@ class MonolithicPipeline:
                 is_toxic=sensitivity_result,
                 processing_time=processing_time
             ))
-
-        batch_total = time.time() - batch_start
-        print("\nBatch timing (seconds):")
-        for name, duration in stage_timings:
-            print(f"- {name}: {duration:.3f}")
-        print(f"- total: {batch_total:.3f}")
-        self._write_metrics(responses, start_times, stage_end_times, stage_timings)
+            self._log_stage_metrics(  # Timing logic (new)
+                request_id=request.request_id,
+                start_time=start_times[idx],
+                sentiment=sentiments[idx],
+                is_toxic=sensitivity_result,
+                processing_time=processing_time,
+                stage_timings=stage_timings
+            )
+        
         return responses
 
-    def _write_metrics(
+    def _log_stage_metrics(
         self,
-        responses: List[PipelineResponse],
-        start_times: List[float],
-        stage_end_times: Dict[str, float],
-        stage_timings: List[tuple],
+        request_id: str,
+        start_time: float,
+        sentiment: str,
+        is_toxic: str,
+        processing_time: float,
+        stage_timings: Dict[str, float]
     ) -> None:
-        fieldnames = [
-            "request_id",
-            "start_time",
-            "retrieval_finished_at",
-            "generation_finished_at",
-            "retrieval_duration",
-            "generation_duration",
-            "total_processing_time",
-            "sentiment",
-            "is_toxic",
-            "node_number",
-            "stage_embeddings",
-            "stage_faiss_search",
-            "stage_fetch_documents",
-            "stage_rerank",
-            "stage_generate",
-            "stage_sentiment",
-            "stage_safety_filter",
-            "node_latency",
-            "node_throughput_rps",
-        ]
+        """Timing logic (new): persist per-request stage durations to CSV."""
+        retrieval_duration = sum(
+            stage_timings.get(name, 0.0)
+            for name in (
+                'stage_embeddings',
+                'stage_faiss_search',
+                'stage_fetch_documents',
+                'stage_rerank'
+            )
+        )
+        generation_duration = sum(
+            stage_timings.get(name, 0.0)
+            for name in (
+                'stage_generate',
+                'stage_sentiment',
+                'stage_safety_filter'
+            )
+        )
+        retrieval_finished_at = start_time + retrieval_duration if start_time else None
+        generation_finished_at = start_time + processing_time if start_time else None
+        node_latency = processing_time
+        node_throughput = (1.0 / node_latency) if node_latency else None
+
+        row = {
+            "request_id": request_id,
+            "start_time": start_time,
+            "retrieval_finished_at": retrieval_finished_at,
+            "generation_finished_at": generation_finished_at,
+            "retrieval_duration": retrieval_duration,
+            "generation_duration": generation_duration,
+            "total_processing_time": processing_time,
+            "sentiment": sentiment,
+            "is_toxic": is_toxic,
+            "node_number": NODE_NUMBER,
+            "stage_embeddings": stage_timings.get('stage_embeddings'),
+            "stage_faiss_search": stage_timings.get('stage_faiss_search'),
+            "stage_fetch_documents": stage_timings.get('stage_fetch_documents'),
+            "stage_rerank": stage_timings.get('stage_rerank'),
+            "stage_generate": stage_timings.get('stage_generate'),
+            "stage_sentiment": stage_timings.get('stage_sentiment'),
+            "stage_safety_filter": stage_timings.get('stage_safety_filter'),
+            "node_latency": node_latency,
+            "node_throughput_rps": node_throughput,
+        }
+
         try:
             os.makedirs(os.path.dirname(METRICS_CSV_PATH) or ".", exist_ok=True)
             write_header = not os.path.exists(METRICS_CSV_PATH)
             with open(METRICS_CSV_PATH, "a", newline="") as csvfile:
-                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer = csv.DictWriter(csvfile, fieldnames=METRIC_FIELDNAMES)
                 if write_header:
                     writer.writeheader()
-                for idx, resp in enumerate(responses):
-                    retrieval_finished_at = stage_end_times.get("rerank")
-                    generation_finished_at = stage_end_times.get("safety_filter")
-                    retrieval_duration = (
-                        retrieval_finished_at - start_times[idx]
-                        if retrieval_finished_at
-                        else None
-                    )
-                    generation_duration = (
-                        generation_finished_at - retrieval_finished_at
-                        if retrieval_finished_at and generation_finished_at
-                        else None
-                    )
-                    total_processing_time = generation_finished_at - start_times[idx] if generation_finished_at else resp.processing_time
-                    row = {
-                        "request_id": resp.request_id,
-                        "start_time": start_times[idx],
-                        "retrieval_finished_at": retrieval_finished_at,
-                        "generation_finished_at": generation_finished_at,
-                        "retrieval_duration": retrieval_duration,
-                        "generation_duration": generation_duration,
-                        "total_processing_time": total_processing_time,
-                        "sentiment": resp.sentiment,
-                        "is_toxic": resp.is_toxic,
-                        "node_number": NODE_NUMBER,
-                        "node_latency": resp.processing_time,
-                        "node_throughput_rps": (1.0 / resp.processing_time) if resp.processing_time else None,
-                    }
-                    for name, duration in stage_timings:
-                        row[f"stage_{name}"] = duration
-                    writer.writerow(row)
-        except Exception:
-            return
+                writer.writerow(row)
+        except Exception as exc:
+            warnings.warn(f"Failed to write timing metrics: {exc}")
     
     def _generate_embeddings_batch(self, texts: List[str]) -> np.ndarray:
         """Step 2: Generate embeddings for a batch of queries"""
@@ -473,7 +482,8 @@ def handle_query():
         })
 
         # Wait for processing (with timeout). Very inefficient - would suggest using a more efficient waiting and timeout mechanism.
-        timeout = 300  # 5 minutes
+        # timeout = 300  # 5 minutes
+        # timeout = 600  # 10 minutes
         start_wait = time.time()
         while True:
             with results_lock:
@@ -533,3 +543,11 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+    """
+    Command:
+    Run pipeline server: 
+        TOTAL_NODES=1 NODE_NUMBER=0 NODE_0_IP=localhost:8080 python3 pipeline-original.py
+    Run client: 
+        NODE_0_IP=localhost:8080 python3 client.py
+    """

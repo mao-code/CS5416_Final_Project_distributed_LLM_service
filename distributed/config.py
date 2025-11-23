@@ -98,7 +98,7 @@ class Settings:
             batch_timeout_2=float(os.environ.get("BATCH_TIMEOUT_2", "0.05")),
             http_timeout=float(os.environ.get("HTTP_TIMEOUT", "120")),
             request_timeout=float(os.environ.get("REQUEST_TIMEOUT", "600")),
-            metrics_csv_path=os.environ.get("METRICS_CSV_PATH", "request_timings.csv"),
+            metrics_csv_path=os.environ.get("METRICS_CSV_PATH", "mao_request_timings.csv"),
             metrics_enabled=_get_bool("METRICS_ENABLED", True),
             prefer_gpu=_get_bool("USE_GPU", False),
             only_cpu=_get_bool("ONLY_CPU", False),
