@@ -43,14 +43,31 @@ class GenerationProcessor:
     def process_batch(self, items: List[GenerationItem]) -> List[PipelineResult]:
         docs = self._fetch_documents(items)
         prompts = [self._build_prompt(item.query, docs.get(item.request_id, [])) for item in items]
+
+        generate_start = time.time()
         completions = self._generate(prompts)
+        generate_end = time.time()
+
+        sentiment_start = generate_end
         sentiments = self._sentiment(completions)
+        sentiment_end = time.time()
+
+        safety_start = sentiment_end
         toxicity = self._toxicity(completions)
+        safety_end = time.time()
+
+        stage_timings = {
+            "stage_generate": generate_end - generate_start,
+            "stage_sentiment": sentiment_end - sentiment_start,
+            "stage_safety_filter": safety_end - safety_start,
+        }
 
         results: List[PipelineResult] = []
         metrics_rows: List[dict] = []
+        generation_finished_at_ts = safety_end
+
         for idx, item in enumerate(items):
-            generation_finished_at = time.time()
+            generation_finished_at = generation_finished_at_ts
             retrieval_finished_at = item.retrieval_finished_at or generation_finished_at
             processing_time = generation_finished_at - item.start_time
             retrieval_duration = (
@@ -67,11 +84,19 @@ class GenerationProcessor:
                     generated_response=completions[idx],
                     sentiment=sentiments[idx],
                     is_toxic="true" if toxicity[idx] else "false",
+                    start_time=item.start_time,
                     processing_time=processing_time,
                     retrieval_finished_at=retrieval_finished_at,
                     generation_finished_at=generation_finished_at,
                     retrieval_duration=retrieval_duration,
                     generation_duration=generation_duration,
+                    stage_embeddings=item.stage_embeddings,
+                    stage_faiss_search=item.stage_faiss_search,
+                    stage_fetch_documents=item.stage_fetch_documents,
+                    stage_rerank=item.stage_rerank,
+                    stage_generate=stage_timings["stage_generate"],
+                    stage_sentiment=stage_timings["stage_sentiment"],
+                    stage_safety_filter=stage_timings["stage_safety_filter"],
                 )
             )
             metrics_rows.append(
@@ -85,6 +110,16 @@ class GenerationProcessor:
                     "total_processing_time": processing_time,
                     "sentiment": sentiments[idx],
                     "is_toxic": "true" if toxicity[idx] else "false",
+                    "stage_embeddings": item.stage_embeddings,
+                    "stage_faiss_search": item.stage_faiss_search,
+                    "stage_fetch_documents": item.stage_fetch_documents,
+                    "stage_rerank": item.stage_rerank,
+                    "stage_generate": stage_timings["stage_generate"],
+                    "stage_sentiment": stage_timings["stage_sentiment"],
+                    "stage_safety_filter": stage_timings["stage_safety_filter"],
+                    "node_number": self.settings.node_number,
+                    "node_latency": generation_duration,
+                    "node_throughput_rps": (1.0 / generation_duration) if generation_duration else None,
                 }
             )
         self._log_metrics(metrics_rows)
@@ -176,6 +211,16 @@ class GenerationProcessor:
             "total_processing_time",
             "sentiment",
             "is_toxic",
+            "node_number",
+            "stage_embeddings",
+            "stage_faiss_search",
+            "stage_fetch_documents",
+            "stage_rerank",
+            "stage_generate",
+            "stage_sentiment",
+            "stage_safety_filter",
+            "node_latency",
+            "node_throughput_rps",
         ]
         try:
             with open(path, "a", newline="") as csvfile:

@@ -47,7 +47,7 @@ class Settings:
     request_timeout: float = 600.0
 
     # Metrics/logging
-    metrics_csv_path: str = "request_timings.csv"
+    metrics_csv_path: str = "mao_request_timings.csv"
     metrics_enabled: bool = True
 
     prefer_gpu: bool = False

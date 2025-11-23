@@ -1,4 +1,6 @@
 import asyncio
+import csv
+import os
 import sqlite3
 import time
 from typing import List
@@ -38,14 +40,30 @@ class RetrievalProcessor:
         qids = [item.request_id for item in items]
         starts = [item.start_time for item in items]
 
+        embeddings_start = time.time()
         embeddings = self.embedder.encode(
             queries, normalize_embeddings=True, convert_to_numpy=True
         ).astype("float32")
+        embeddings_end = time.time()
 
+        faiss_start = embeddings_end
         _, doc_indices = self.index.search(embeddings, self.settings.retrieval_k)
+        faiss_end = time.time()
+
+        fetch_start = faiss_end
         documents_batch = self._fetch_documents(doc_indices)
+        fetch_end = time.time()
+
+        rerank_start = fetch_end
         reranked_docs = self._rerank(queries, documents_batch)
         retrieval_finished_at = time.time()
+
+        stage_timings = {
+            "stage_embeddings": embeddings_end - embeddings_start,
+            "stage_faiss_search": faiss_end - faiss_start,
+            "stage_fetch_documents": fetch_end - fetch_start,
+            "stage_rerank": retrieval_finished_at - rerank_start,
+        }
 
         output: List[GenerationItem] = []
         for idx, docs in enumerate(reranked_docs):
@@ -57,6 +75,7 @@ class RetrievalProcessor:
                     reranked_doc_ids=doc_ids,
                     start_time=starts[idx],
                     retrieval_finished_at=retrieval_finished_at,
+                    **stage_timings,
                 )
             )
         return output
@@ -148,6 +167,7 @@ async def worker_loop(state: Node1State) -> None:
             raise RuntimeError(f"retrieval batch failed: {exc}") from exc
         try:
             await _send_generation_batch(state, generation_batch)
+            _log_metrics(state, generation_batch)
         except Exception:
             # Requeue on send failure
             for item in batch:
@@ -184,3 +204,70 @@ def build_app(settings: Settings) -> FastAPI:
         }
 
     return app
+
+
+def _log_metrics(state: Node1State, generation_batch: List[GenerationItem]) -> None:
+    if not state.settings.metrics_enabled or not generation_batch:
+        return
+    path = state.settings.metrics_csv_path
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    write_header = not os.path.exists(path)
+    fieldnames = [
+        "request_id",
+        "start_time",
+        "retrieval_finished_at",
+        "generation_finished_at",
+        "retrieval_duration",
+        "generation_duration",
+        "total_processing_time",
+        "sentiment",
+        "is_toxic",
+        "node_number",
+        "stage_embeddings",
+        "stage_faiss_search",
+        "stage_fetch_documents",
+        "stage_rerank",
+        "stage_generate",
+        "stage_sentiment",
+        "stage_safety_filter",
+        "node_latency",
+        "node_throughput_rps",
+    ]
+    try:
+        with open(path, "a", newline="") as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            if write_header:
+                writer.writeheader()
+            for item in generation_batch:
+                retrieval_duration = None
+                total_processing_time = None
+                if item.retrieval_finished_at:
+                    retrieval_duration = item.retrieval_finished_at - item.start_time
+                    total_processing_time = retrieval_duration
+                node_latency = retrieval_duration
+                node_throughput = (1.0 / node_latency) if node_latency else None
+                writer.writerow(
+                    {
+                        "request_id": item.request_id,
+                        "start_time": item.start_time,
+                        "retrieval_finished_at": item.retrieval_finished_at,
+                        "generation_finished_at": None,
+                        "retrieval_duration": retrieval_duration,
+                        "generation_duration": None,
+                        "total_processing_time": total_processing_time,
+                        "sentiment": "",
+                        "is_toxic": "",
+                        "node_number": state.settings.node_number,
+                        "stage_embeddings": item.stage_embeddings,
+                        "stage_faiss_search": item.stage_faiss_search,
+                        "stage_fetch_documents": item.stage_fetch_documents,
+                        "stage_rerank": item.stage_rerank,
+                        "stage_generate": None,
+                        "stage_sentiment": None,
+                        "stage_safety_filter": None,
+                        "node_latency": node_latency,
+                        "node_throughput_rps": node_throughput,
+                    }
+                )
+    except Exception:
+        return

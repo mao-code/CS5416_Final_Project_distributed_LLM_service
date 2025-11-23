@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Start Nodes one at a time to see logs
+Start them in the foreground one at a time so the HF download progress shows:
+# NODE_NUMBER=0 python -m distributed.run_node
+# NODE_NUMBER=1 python -m distributed.run_node
+# NODE_NUMBER=2 python -m distributed.run_node
+
 # Convenience launcher for the distributed pipeline.
 # MODE=all spins up nodes 0,1,2 locally. Otherwise, run a single node (NODE_NUMBER required).
 
