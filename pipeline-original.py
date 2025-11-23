@@ -30,7 +30,7 @@ NODE_1_IP = os.environ.get('NODE_1_IP', 'localhost:8000')
 NODE_2_IP = os.environ.get('NODE_2_IP', 'localhost:8000')
 FAISS_INDEX_PATH = os.environ.get('FAISS_INDEX_PATH', 'faiss_index.bin')
 DOCUMENTS_DIR = os.environ.get('DOCUMENTS_DIR', 'documents/')
-METRICS_CSV_PATH = os.environ.get('METRICS_CSV_PATH', 'mao_request_timings.csv')  # Timing logic path (new)
+METRICS_CSV_PATH = os.environ.get('METRICS_CSV_PATH', 'original_request_timings.csv')  # Timing logic path (new)
 METRIC_FIELDNAMES = [
     "request_id",
     "start_time",
@@ -483,7 +483,7 @@ def handle_query():
 
         # Wait for processing (with timeout). Very inefficient - would suggest using a more efficient waiting and timeout mechanism.
         # timeout = 300  # 5 minutes
-        # timeout = 600  # 10 minutes
+        timeout = 900  # 15 minutes
         start_wait = time.time()
         while True:
             with results_lock:

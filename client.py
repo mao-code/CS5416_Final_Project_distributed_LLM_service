@@ -217,10 +217,10 @@ def main():
     
     # Wait for all threads to complete (with a reasonable timeout)
     # print(f"\n\nWaiting for all responses (up to 5 minutes)...")
-    print(f"\n\nWaiting for all responses (up to 10 minutes)...")
+    print(f"\n\nWaiting for all responses (up to 15 minutes)...")
     for thread in threads:
         # thread.join(timeout=320)  # 5 min 20 sec to allow for some buffer
-        thread.join(timeout=620)  # 10 min 20 sec to allow for some buffer
+        thread.join(timeout=920)  # 15 min 20 sec to allow for some buffer
     
     # Print summary
     total_time = time.time() - start_time
