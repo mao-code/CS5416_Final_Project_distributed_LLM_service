@@ -10,7 +10,13 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline as hf_pip
 
 from .config import Settings
 from .models import GenerationBatch, GenerationItem, PipelineResult, ResultBatch
-from .utils import chunked, opportunistic_batch, resolve_device, write_metrics_row
+from .utils import (
+    chunked,
+    ensure_document_indices,
+    opportunistic_batch,
+    resolve_device,
+    write_metrics_row,
+)
 
 
 class GenerationProcessor:
@@ -19,6 +25,7 @@ class GenerationProcessor:
         self.device = resolve_device(settings.prefer_gpu, settings.only_cpu)
         self.device_index = 0 if self.device.type == "cuda" else -1
         self.conn = sqlite3.connect(self.settings.documents_db_path, check_same_thread=False)
+        ensure_document_indices([self.conn])
 
         # Heavy models loaded once
         self.llm_tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")

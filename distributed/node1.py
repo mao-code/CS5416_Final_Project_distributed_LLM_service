@@ -13,7 +13,12 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from .config import Settings
 from .models import GenerationBatch, GenerationItem, RetrievalBatch, RetrievalItem
-from .utils import opportunistic_batch, resolve_device, write_metrics_row
+from .utils import (
+    ensure_document_indices,
+    opportunistic_batch,
+    resolve_device,
+    write_metrics_row,
+)
 
 
 class RetrievalProcessor:
@@ -31,6 +36,7 @@ class RetrievalProcessor:
         #     sqlite3.connect(f"{self.settings.documents_db_path}.shard{i}", check_same_thread=False)
         #     for i in range(self.settings.num_shards)
         # ] 
+        self._ensure_indices()
         
 
     def process_batch(self, items: List[RetrievalItem]) -> List[GenerationItem]:
@@ -51,7 +57,7 @@ class RetrievalProcessor:
         faiss_end = time.time()
 
         fetch_start = faiss_end
-        documents_batch = self._fetch_documents(indices) # TODO: COMMENT THIS
+        # documents_batch = self._fetch_documents(indices) # TODO: COMMENT THIS
         documents_batch = self._fetch_documents_sharded(indices) # TODO: UNCOMMENT THIS
         fetch_end = time.time()
 
@@ -80,6 +86,12 @@ class RetrievalProcessor:
                 )
             )
         return output
+
+    def _ensure_indices(self) -> None:
+        connections = [self.conn]
+        if hasattr(self, "db_conns"):
+            connections.extend(self.db_conns)
+        ensure_document_indices(connections)
     
     def _get_shard(self, doc_id: int) -> sqlite3.Connection:
         return self.db_conns[doc_id % 4]

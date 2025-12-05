@@ -1,6 +1,7 @@
 import asyncio
 import csv
 import os
+import sqlite3
 import time
 from typing import Iterable, List, Sequence, TypeVar
 
@@ -44,6 +45,22 @@ def resolve_device(prefer_gpu: bool, only_cpu: bool = False) -> torch.device:
 def chunked(seq: Sequence[T], size: int) -> Iterable[Sequence[T]]:
     for idx in range(0, len(seq), size):
         yield seq[idx : idx + size]
+
+
+def ensure_document_indices(connections: Iterable[sqlite3.Connection]) -> None:
+    """
+    Make sure the SQLite database has an index on doc_id for fast lookups.
+    Safe to call repeatedly when a node starts.
+    """
+    for conn in connections:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_documents_doc_id ON documents(doc_id)"
+            )
+            conn.commit()
+        finally:
+            cursor.close()
 
 
 # Timing logic helpers (new)
