@@ -101,5 +101,5 @@ class Settings:
             metrics_csv_path=os.environ.get("METRICS_CSV_PATH", "mao_request_timings.csv"),
             metrics_enabled=_get_bool("METRICS_ENABLED", True),
             prefer_gpu=_get_bool("USE_GPU", False),
-            only_cpu=_get_bool("ONLY_CPU", False),
+            only_cpu=_get_bool("ONLY_CPU", True),
         )

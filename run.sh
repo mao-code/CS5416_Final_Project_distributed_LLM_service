@@ -1,7 +1,5 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# Run script for ML Inference Pipeline
-# This script will be executed on each node
+echo "Starting Node $NODE_NUMBER..."
 
-echo "Starting pipeline on Node $NODE_NUMBER..."
-python3 pipeline.py
+NODE_NUMBER=$NODE_NUMBER NODE_0_IP=$NODE_0_IP NODE_1_IP=$NODE_1_IP NODE_2_IP=$NODE_2_IP TOTAL_NODES=$TOTAL_NODES FAISS_INDEX_PATH=$FAISS_INDEX_PATH DOCUMENTS_DIR=$DOCUMENTS_DIR python -m distributed.run_node
