@@ -25,7 +25,13 @@ class RetrievalProcessor:
         self.reranker_tokenizer = AutoTokenizer.from_pretrained("BAAI/bge-reranker-base")
         self.reranker_model = AutoModelForSequenceClassification.from_pretrained("BAAI/bge-reranker-base").to(self.device)
         self.reranker_model.eval()
-        self.conn = sqlite3.connect(self.settings.documents_db_path, check_same_thread=False)
+        self.conn = sqlite3.connect(self.settings.documents_db_path, check_same_thread=False) # TODO: COMMENT THIS
+        # TODO: UNCOMMENT THIS
+        # self.db_conns = [
+        #     sqlite3.connect(f"{self.settings.documents_db_path}.shard{i}", check_same_thread=False)
+        #     for i in range(self.settings.num_shards)
+        # ] 
+        
 
     def process_batch(self, items: List[RetrievalItem]) -> List[GenerationItem]:
         queries = [item.query for item in items]
@@ -45,7 +51,8 @@ class RetrievalProcessor:
         faiss_end = time.time()
 
         fetch_start = faiss_end
-        documents_batch = self._fetch_documents(indices)
+        documents_batch = self._fetch_documents(indices) # TODO: COMMENT THIS
+        documents_batch = self._fetch_documents_sharded(indices) # TODO: UNCOMMENT THIS
         fetch_end = time.time()
 
         rerank_start = fetch_end
@@ -73,8 +80,46 @@ class RetrievalProcessor:
                 )
             )
         return output
+    
+    def _get_shard(self, doc_id: int) -> sqlite3.Connection:
+        return self.db_conns[doc_id % 4]
+    
+    def _fetch_documents_sharded(self, doc_id_batches: np.ndarray) -> List[List[dict]]:
+        shard_groups = {}
+    
+        for batch_idx, doc_ids in enumerate(doc_id_batches):
+            for doc_id in doc_ids:
+                shard_idx = doc_id % 4 # 4 shards
+                if shard_idx not in shard_groups:
+                    shard_groups[shard_idx] = []
+                shard_groups[shard_idx].append((batch_idx, int(doc_id)))
 
-    def _fetch_documents(self, doc_id_batches: np.ndarray) -> List[List[dict]]:
+        doc_cache = {}
+        for shard_idx, doc_list in shard_groups.items():
+            cursor = self.db_conns[shard_idx].cursor()
+            for _, doc_id in doc_list:
+                if doc_id in doc_cache:
+                    continue
+                cursor.execute(
+                    'SELECT doc_id, title, content, category FROM documents WHERE doc_id = ?',
+                    (doc_id,)
+                )
+                result = cursor.fetchone()
+                if result:
+                    doc_cache[doc_id] = {
+                        "doc_id": result[0],
+                        "title": result[1],
+                        "content": result[2],
+                        "category": result[3],
+                    }
+        documents_batch: List[List[dict]] = []
+        for doc_ids in doc_id_batches:
+            documents = [doc_cache[int(doc_id)] for doc_id in doc_ids if doc_id in doc_cache]
+            documents_batch.append(documents)
+        
+        return documents_batch
+
+    def _fetch_documents(self, doc_id_batches: np.ndarray) -> List[List[dict]]:    
         cursor = self.conn.cursor()
         documents_batch: List[List[dict]] = []
         for doc_ids in doc_id_batches:
