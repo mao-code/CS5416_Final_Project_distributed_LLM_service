@@ -5,4 +5,4 @@ NODE_0_IP=$NODE_0_IP python client.py
 
 # Example Usage
 # NODE_0_IP=127.0.0.1:8000 \
-# ./cient.sh
+# ./client.sh

@@ -129,7 +129,7 @@ def main():
     threads = []
     
     # Send 6 requests at 10-second intervals
-    for i in range(20):
+    for i in range(6):
         # Calculate when this request should be sent
         target_send_time = start_time + (i * 10)
         

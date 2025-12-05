@@ -34,6 +34,7 @@ class Settings:
     max_tokens: int = 128 #You must use this max token limit
     truncate_length: int = 512 # You must use this truncate length
     llm_max_batch: int = 2
+    num_shards: int = 4
 
     max_batch_size_0: int = 8
     batch_timeout_0: float = 0.02
@@ -70,6 +71,7 @@ class Settings:
             max_tokens=int(os.environ.get("MAX_TOKENS", "128")),
             truncate_length=int(os.environ.get("TRUNCATE_LENGTH", "512")),
             llm_max_batch=int(os.environ.get("LLM_MAX_BATCH", "2")),
+            num_shards=int(os.environ.get("NUM_SHARDS", "4")),
             max_batch_size_0=int(os.environ.get("MAX_BATCH_SIZE_0", "8")),
             batch_timeout_0=float(os.environ.get("BATCH_TIMEOUT_0", "0.02")),
             max_batch_size_1=int(os.environ.get("MAX_BATCH_SIZE_1", "8")),
