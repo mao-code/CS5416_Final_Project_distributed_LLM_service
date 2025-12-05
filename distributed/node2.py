@@ -1,5 +1,4 @@
 import asyncio
-import os
 import sqlite3
 import time
 from typing import Dict, List
@@ -25,21 +24,8 @@ class GenerationProcessor:
         self.settings = settings
         self.device = resolve_device(settings.prefer_gpu, settings.only_cpu)
         self.device_index = 0 if self.device.type == "cuda" else -1
-        shard_paths = [
-            f"{self.settings.documents_db_path}.shard{i}"
-            for i in range(self.settings.num_shards)
-        ]
-        missing_shards = [path for path in shard_paths if not os.path.exists(path)]
-        if missing_shards:
-            raise FileNotFoundError(
-                f"Expected sharded databases missing: {missing_shards}. "
-                "Ensure documents are sharded before starting Node2."
-            )
-        self.db_conns = [
-            sqlite3.connect(shard_paths[i], check_same_thread=False)
-            for i in range(self.settings.num_shards)
-        ]
-        ensure_document_indices(self.db_conns)
+        self.conn = sqlite3.connect(self.settings.documents_db_path, check_same_thread=False)
+        ensure_document_indices([self.conn])
 
         # Heavy models loaded once
         self.llm_tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
@@ -141,25 +127,32 @@ class GenerationProcessor:
         return results
 
     def _fetch_documents(self, items: List[GenerationItem]) -> Dict[str, List[dict]]:
+        cursor = self.conn.cursor()
+        doc_cache: Dict[int, dict] = {}
         request_docs: Dict[str, List[dict]] = {}
         for item in items:
             documents: List[dict] = []
             for doc_id in item.reranked_doc_ids:
-                cursor = self._get_shard(int(doc_id)).cursor()
+                doc_id_int = int(doc_id)
+                if doc_id_int in doc_cache:
+                    documents.append(doc_cache[doc_id_int])
+                    continue
                 cursor.execute(
                     'SELECT doc_id, title, content, category FROM documents WHERE doc_id = ?',
-                    (doc_id,)
+                    (doc_id_int,)
                 )
                 result = cursor.fetchone()
-                cursor.close()
                 if result:
-                    documents.append({
+                    record = {
                         "doc_id": result[0],
                         "title": result[1],
                         "content": result[2],
                         "category": result[3],
-                    })
+                    }
+                    doc_cache[doc_id_int] = record
+                    documents.append(record)
             request_docs[item.request_id] = documents
+        cursor.close()
         return request_docs
 
     def _build_prompt(self, query: str, docs: List[dict]) -> str:
@@ -213,9 +206,6 @@ class GenerationProcessor:
         for result in raw_results:
             toxicity_flags.append(result['score'] > 0.5)
         return toxicity_flags
-
-    def _get_shard(self, doc_id: int) -> sqlite3.Connection:
-        return self.db_conns[doc_id % self.settings.num_shards]
 
     def _log_metrics(self, rows: List[dict]) -> None:
         if not self.settings.metrics_enabled or not rows:
