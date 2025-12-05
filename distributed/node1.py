@@ -20,18 +20,12 @@ class RetrievalProcessor:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.device = resolve_device(settings.prefer_gpu, settings.only_cpu)
-        self.embedder = SentenceTransformer(
-            "BAAI/bge-base-en-v1.5", device=str(self.device)
-        )
+        self.model = SentenceTransformer("BAAI/bge-base-en-v1.5", device=self.device)
         self.index = faiss.read_index(self.settings.faiss_index_path)
         self.reranker_tokenizer = AutoTokenizer.from_pretrained("BAAI/bge-reranker-base")
-        self.reranker_model = AutoModelForSequenceClassification.from_pretrained(
-            "BAAI/bge-reranker-base"
-        ).to(self.device)
+        self.reranker_model = AutoModelForSequenceClassification.from_pretrained("BAAI/bge-reranker-base").to(self.device)
         self.reranker_model.eval()
-        self.conn = sqlite3.connect(
-            self.settings.documents_db_path, check_same_thread=False
-        )
+        self.conn = sqlite3.connect(self.settings.documents_db_path, check_same_thread=False)
 
     def process_batch(self, items: List[RetrievalItem]) -> List[GenerationItem]:
         queries = [item.query for item in items]
@@ -39,21 +33,23 @@ class RetrievalProcessor:
         starts = [item.start_time for item in items]
 
         embeddings_start = time.time()
-        embeddings = self.embedder.encode(
-            queries, normalize_embeddings=True, convert_to_numpy=True
+        query_embeddings = self.model.encode(
+            queries,
+            normalize_embeddings=True,
+            convert_to_numpy=True
         ).astype("float32")
         embeddings_end = time.time()
 
         faiss_start = embeddings_end
-        _, doc_indices = self.index.search(embeddings, self.settings.retrieval_k)
+        _, indices = self.index.search(query_embeddings, self.settings.retrieval_k)
         faiss_end = time.time()
 
         fetch_start = faiss_end
-        documents_batch = self._fetch_documents(doc_indices)
+        documents_batch = self._fetch_documents(indices)
         fetch_end = time.time()
 
         rerank_start = fetch_end
-        reranked_docs = self._rerank(queries, documents_batch)
+        reranked_docs_batch = self._rerank_documents_batch(queries, documents_batch)
         retrieval_finished_at = time.time()
 
         stage_timings = {
@@ -64,8 +60,8 @@ class RetrievalProcessor:
         }
 
         output: List[GenerationItem] = []
-        for idx, docs in enumerate(reranked_docs):
-            doc_ids = [doc["doc_id"] for doc in docs[: self.settings.rerank_top_k]]
+        for idx, docs in enumerate(reranked_docs_batch):
+            doc_ids = [doc["doc_id"] for doc in docs[:3]]
             output.append(
                 GenerationItem(
                     request_id=qids[idx],
@@ -78,55 +74,52 @@ class RetrievalProcessor:
             )
         return output
 
-    def _fetch_documents(self, doc_idx_batch: np.ndarray) -> List[List[dict]]:
+    def _fetch_documents(self, doc_id_batches: np.ndarray) -> List[List[dict]]:
         cursor = self.conn.cursor()
-        documents: List[List[dict]] = []
-        for row in doc_idx_batch:
-            docs: List[dict] = []
-            for doc_id in row:
+        documents_batch: List[List[dict]] = []
+        for doc_ids in doc_id_batches:
+            documents: List[dict] = []
+            for doc_id in doc_ids:
                 cursor.execute(
-                    "SELECT doc_id, title, content, category FROM documents WHERE doc_id = ?",
-                    (int(doc_id),),
+                    'SELECT doc_id, title, content, category FROM documents WHERE doc_id = ?',
+                    (doc_id,)
                 )
-                res = cursor.fetchone()
-                if res:
-                    docs.append(
-                        {
-                            "doc_id": res[0],
-                            "title": res[1],
-                            "content": res[2],
-                            "category": res[3],
-                        }
-                    )
-            documents.append(docs)
-        return documents
+                result = cursor.fetchone()
+                if result:
+                    documents.append({
+                        "doc_id": result[0],
+                        "title": result[1],
+                        "content": result[2],
+                        "category": result[3],
+                    })
+            documents_batch.append(documents)
+        return documents_batch
 
-    def _rerank(self, queries: List[str], documents_batch: List[List[dict]]) -> List[List[dict]]:
-        reranked: List[List[dict]] = []
-        for query, docs in zip(queries, documents_batch):
-            if not docs:
-                reranked.append([])
+    def _rerank_documents_batch(self, queries: List[str], documents_batch: List[List[dict]]) -> List[List[dict]]:
+        reranked_batches: List[List[dict]] = []
+        for query, documents in zip(queries, documents_batch):
+            if not documents:
+                reranked_batches.append([])
                 continue
-            pairs = [[query, doc["content"]] for doc in docs]
+            pairs = [[query, doc["content"]] for doc in documents]
             with torch.inference_mode():
-                encoded = self.reranker_tokenizer(
+                inputs = self.reranker_tokenizer(
                     pairs,
                     padding=True,
                     truncation=True,
                     return_tensors="pt",
                     max_length=self.settings.truncate_length,
                 ).to(self.device)
-                scores = (
-                    self.reranker_model(**encoded, return_dict=True)
+                scores = (self.reranker_model(**inputs, return_dict=True)
                     .logits.view(-1)
                     .float()
                     .cpu()
                     .numpy()
                 )
-            merged = list(zip(docs, scores))
-            merged.sort(key=lambda x: x[1], reverse=True)
-            reranked.append([doc for doc, _ in merged])
-        return reranked
+            doc_scores = list(zip(documents, scores))
+            doc_scores.sort(key=lambda x: x[1], reverse=True)
+            reranked_batches.append([doc for doc, _ in doc_scores])
+        return reranked_batches
 
 
 class Node1State:
@@ -139,10 +132,9 @@ class Node1State:
 
 async def _send_generation_batch(state: Node1State, batch: List[GenerationItem]) -> None:
     payload = GenerationBatch(batch=batch).model_dump()
-    url = state.settings.node_url(2, "/enqueue_generation_batch")
     for attempt in range(3):
         try:
-            await state.client.post(url, json=payload)
+            await state.client.post(f"http://{state.settings.node_2_ip}/enqueue_generation_batch", json=payload)
             return
         except Exception:
             if attempt == 2:
@@ -161,8 +153,7 @@ async def worker_loop(state: Node1State) -> None:
                 None, state.processor.process_batch, batch
             )
         except Exception as exc:
-            # Fail fast so Node 0 can retry
-            raise RuntimeError(f"retrieval batch failed: {exc}") from exc
+            raise RuntimeError(f"retrieval batch failed: {exc}") from exc # Fail fast so Node 0 can retry
         try:
             await _send_generation_batch(state, generation_batch)
             _log_metrics(state, generation_batch)

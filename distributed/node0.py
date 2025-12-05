@@ -29,9 +29,7 @@ class Node0State:
 async def _send_to_node1(state: Node0State, batch: list[RetrievalItem]) -> None:
     payload = RetrievalBatch(batch=batch).model_dump()
     try:
-        await state.client.post(
-            state.settings.node_url(1, "/enqueue_retrieval_batch"), json=payload
-        )
+        await state.client.post(f"http://{state.settings.node_1_ip}/enqueue_retrieval_batch", json=payload)
     except Exception as exc:  # network failure -> fail futures
         async with state.pending_lock:
             for item in batch:

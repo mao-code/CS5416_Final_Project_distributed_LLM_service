@@ -30,10 +30,9 @@ class Settings:
     faiss_index_path: str = "faiss_index.bin"
     documents_dir: str = "documents"
 
-    retrieval_k: int = 10
-    rerank_top_k: int = 5
-    max_tokens: int = 128
-    truncate_length: int = 512
+    retrieval_k: int = 10  #You must retrieve this many documents from the FAISS index
+    max_tokens: int = 128 #You must use this max token limit
+    truncate_length: int = 512 # You must use this truncate length
     llm_max_batch: int = 2
 
     max_batch_size_0: int = 8
@@ -53,24 +52,6 @@ class Settings:
     prefer_gpu: bool = False
     only_cpu: bool = False
 
-    def node_ips(self):
-        return [self.node_0_ip, self.node_1_ip, self.node_2_ip]
-
-    @property
-    def bind_host_port(self) -> Tuple[str, int]:
-        host, port = _parse_host_port(self.node_ips()[self.node_number])
-        return host, port
-
-    def node_url(self, node_idx: int, path: str) -> str:
-        host, _ = _parse_host_port(self.node_ips()[node_idx])
-        addr = self.node_ips()[node_idx]
-        if "://" in addr:
-            base = addr
-        else:
-            base = f"http://{addr}"
-        path = path if path.startswith("/") else f"/{path}"
-        return f"{base}{path}"
-
     @property
     def documents_db_path(self) -> str:
         return os.path.join(self.documents_dir, "documents.db")
@@ -86,7 +67,6 @@ class Settings:
             faiss_index_path=os.environ.get("FAISS_INDEX_PATH", "faiss_index.bin"),
             documents_dir=os.environ.get("DOCUMENTS_DIR", "documents"),
             retrieval_k=int(os.environ.get("RETRIEVAL_K", "10")),
-            rerank_top_k=int(os.environ.get("RERANK_TOP_K", "5")),
             max_tokens=int(os.environ.get("MAX_TOKENS", "128")),
             truncate_length=int(os.environ.get("TRUNCATE_LENGTH", "512")),
             llm_max_batch=int(os.environ.get("LLM_MAX_BATCH", "2")),

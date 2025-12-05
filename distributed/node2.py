@@ -18,16 +18,12 @@ class GenerationProcessor:
         self.settings = settings
         self.device = resolve_device(settings.prefer_gpu, settings.only_cpu)
         self.device_index = 0 if self.device.type == "cuda" else -1
-        self.conn = sqlite3.connect(
-            self.settings.documents_db_path, check_same_thread=False
-        )
+        self.conn = sqlite3.connect(self.settings.documents_db_path, check_same_thread=False)
 
         # Heavy models loaded once
         self.llm_tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
-        self.llm_model = AutoModelForCausalLM.from_pretrained(
-            "Qwen/Qwen2.5-0.5B-Instruct"
-        ).to(self.device)
-        self.sentiment = hf_pipeline(
+        self.llm_model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct").to(self.device) # TODO: try half precision
+        self.classifier = hf_pipeline(
             "sentiment-analysis",
             model="nlptown/bert-base-multilingual-uncased-sentiment",
             device=self.device_index,
@@ -43,15 +39,15 @@ class GenerationProcessor:
         prompts = [self._build_prompt(item.query, docs.get(item.request_id, [])) for item in items]
 
         generate_start = time.time()
-        completions = self._generate(prompts)
+        responses_text = self._generate_responses_batch(prompts)
         generate_end = time.time()
 
         sentiment_start = generate_end
-        sentiments = self._sentiment(completions)
+        sentiments = self._analyze_sentiment_batch(responses_text)
         sentiment_end = time.time()
 
         safety_start = sentiment_end
-        toxicity = self._toxicity(completions)
+        toxicity_flags = self._filter_response_safety_batch(responses_text)
         safety_end = time.time()
 
         stage_timings = {
@@ -79,9 +75,9 @@ class GenerationProcessor:
             results.append(
                 PipelineResult(
                     request_id=item.request_id,
-                    generated_response=completions[idx],
+                    generated_response=responses_text[idx],
                     sentiment=sentiments[idx],
-                    is_toxic="true" if toxicity[idx] else "false",
+                    is_toxic="true" if toxicity_flags[idx] else "false",
                     start_time=item.start_time,
                     processing_time=processing_time,
                     retrieval_finished_at=retrieval_finished_at,
@@ -107,7 +103,7 @@ class GenerationProcessor:
                     "generation_duration": generation_duration,
                     "total_processing_time": processing_time,
                     "sentiment": sentiments[idx],
-                    "is_toxic": "true" if toxicity[idx] else "false",
+                    "is_toxic": "true" if toxicity_flags[idx] else "false",
                     "stage_embeddings": item.stage_embeddings,
                     "stage_faiss_search": item.stage_faiss_search,
                     "stage_fetch_documents": item.stage_fetch_documents,
@@ -125,36 +121,33 @@ class GenerationProcessor:
 
     def _fetch_documents(self, items: List[GenerationItem]) -> Dict[str, List[dict]]:
         cursor = self.conn.cursor()
-        resolved: Dict[str, List[dict]] = {}
+        request_docs: Dict[str, List[dict]] = {}
         for item in items:
-            docs: List[dict] = []
+            documents: List[dict] = []
             for doc_id in item.reranked_doc_ids:
                 cursor.execute(
-                    "SELECT doc_id, title, content, category FROM documents WHERE doc_id = ?",
-                    (int(doc_id),),
+                    'SELECT doc_id, title, content, category FROM documents WHERE doc_id = ?',
+                    (doc_id,)
                 )
-                res = cursor.fetchone()
-                if res:
-                    docs.append(
-                        {
-                            "doc_id": res[0],
-                            "title": res[1],
-                            "content": res[2],
-                            "category": res[3],
-                        }
-                    )
-            resolved[item.request_id] = docs
-        return resolved
+                result = cursor.fetchone()
+                if result:
+                    documents.append({
+                        "doc_id": result[0],
+                        "title": result[1],
+                        "content": result[2],
+                        "category": result[3],
+                    })
+            request_docs[item.request_id] = documents
+        return request_docs
 
     def _build_prompt(self, query: str, docs: List[dict]) -> str:
-        context = "\n".join(
-            f"- {doc['title']}: {doc['content'][:200]}"
-            for doc in docs[: self.settings.rerank_top_k]
+        context = "\n".join(f"- {doc['title']}: {doc['content'][:200]}"
+            for doc in docs
         )
         return f"Context:\n{context}\n\nQuestion: {query}\n\nAnswer:"
 
-    def _generate(self, prompts: List[str]) -> List[str]:
-        outputs: List[str] = []
+    def _generate_responses_batch(self, prompts: List[str]) -> List[str]:
+        responses: List[str] = []
         for chunk in chunked(prompts, self.settings.llm_max_batch):
             model_inputs = self.llm_tokenizer(
                 list(chunk),
@@ -164,34 +157,40 @@ class GenerationProcessor:
                 max_length=self.settings.truncate_length,
             ).to(self.device)
             with torch.inference_mode():
-                generated = self.llm_model.generate(
+                generated_ids = self.llm_model.generate(
                     **model_inputs,
                     max_new_tokens=self.settings.max_tokens,
                     temperature=0.01,
                     pad_token_id=self.llm_tokenizer.eos_token_id,
                 )
-            decoded = self.llm_tokenizer.batch_decode(
-                generated, skip_special_tokens=True
+            response = self.llm_tokenizer.batch_decode(
+                generated_ids, skip_special_tokens=True
             )
-            outputs.extend(decoded)
-        return outputs
+            responses.extend(response)
+        return responses
 
-    def _sentiment(self, texts: List[str]) -> List[str]:
-        truncated = [text[: self.settings.truncate_length] for text in texts]
-        raw = self.sentiment(truncated)
-        mapping = {
+    def _analyze_sentiment_batch(self, texts: List[str]) -> List[str]:
+        truncated_texts = [text[: self.settings.truncate_length] for text in texts]
+        raw_results = self.classifier(truncated_texts)
+        sentiment_map = {
             "1 star": "very negative",
             "2 stars": "negative",
             "3 stars": "neutral",
             "4 stars": "positive",
             "5 stars": "very positive",
         }
-        return [mapping.get(item["label"], "neutral") for item in raw]
+        sentiments = []
+        for result in raw_results:
+            sentiments.append(sentiment_map.get(result['label'], 'neutral'))
+        return sentiments
 
-    def _toxicity(self, texts: List[str]) -> List[bool]:
-        truncated = [text[: self.settings.truncate_length] for text in texts]
-        raw = self.toxicity(truncated)
-        return [entry.get("score", 0.0) > 0.5 for entry in raw]
+    def _filter_response_safety_batch(self, texts: List[str]) -> List[bool]:
+        truncated_texts = [text[: self.settings.truncate_length] for text in texts]
+        raw_results = self.toxicity(truncated_texts)
+        toxicity_flags = []
+        for result in raw_results:
+            toxicity_flags.append(result['score'] > 0.5)
+        return toxicity_flags
 
     def _log_metrics(self, rows: List[dict]) -> None:
         if not self.settings.metrics_enabled or not rows:
@@ -215,10 +214,9 @@ class Node2State:
 
 async def _send_results(state: Node2State, results: List[PipelineResult]) -> None:
     payload = ResultBatch(results=results).model_dump()
-    url = state.settings.node_url(0, "/result")
     for attempt in range(3):
         try:
-            await state.client.post(url, json=payload)
+            await state.client.post(f"http://{state.settings.node_0_ip}/result", json=payload)
             return
         except Exception:
             if attempt == 2:
