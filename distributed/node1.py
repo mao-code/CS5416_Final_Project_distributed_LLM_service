@@ -1,7 +1,7 @@
 import asyncio
 import sqlite3
 import time
-from typing import List
+from typing import List, Optional
 
 import faiss
 import httpx
@@ -29,7 +29,9 @@ class RetrievalProcessor:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.device = resolve_device(settings.prefer_gpu, settings.only_cpu)
-        self.model = SentenceTransformer("BAAI/bge-base-en-v1.5", device=self.device)
+        self.model: Optional[SentenceTransformer] = None
+        if not settings.node0_embeddings:
+            self.model = SentenceTransformer("BAAI/bge-base-en-v1.5", device=self.device)
         self.index = faiss.read_index(self.settings.faiss_index_path)
         self.reranker_tokenizer = AutoTokenizer.from_pretrained("BAAI/bge-reranker-base")
         self.reranker_model = AutoModelForSequenceClassification.from_pretrained("BAAI/bge-reranker-base").to(self.device)
@@ -38,6 +40,11 @@ class RetrievalProcessor:
         self._ensure_indices()
         
 
+    def _get_embedding_model(self) -> SentenceTransformer:
+        if self.model is None:
+            self.model = SentenceTransformer("BAAI/bge-base-en-v1.5", device=self.device)
+        return self.model
+
     @log_peak_memory(node_number=1)
     def process_batch(self, items: List[RetrievalItem]) -> List[GenerationItem]:
         queries = [item.query for item in items]
@@ -45,12 +52,24 @@ class RetrievalProcessor:
         starts = [item.start_time for item in items]
 
         embeddings_start = time.time()
-        query_embeddings = self.model.encode(
-            queries,
-            normalize_embeddings=True,
-            convert_to_numpy=True
-        ).astype("float32")
-        embeddings_end = time.time()
+        query_embeddings = None
+        embedding_duration = None
+        if self.settings.node0_embeddings and all(item.embedding is not None for item in items):
+            query_embeddings = np.array([item.embedding for item in items], dtype="float32")
+            embedding_duration = next(
+                (item.stage_embeddings for item in items if item.stage_embeddings is not None),
+                0.0,
+            )
+            embeddings_end = time.time()
+        else:
+            model = self._get_embedding_model()
+            query_embeddings = model.encode(
+                queries,
+                normalize_embeddings=True,
+                convert_to_numpy=True
+            ).astype("float32")
+            embeddings_end = time.time()
+            embedding_duration = embeddings_end - embeddings_start
 
         faiss_start = embeddings_end
         _, indices = self.index.search(query_embeddings, self.settings.retrieval_k)
@@ -65,7 +84,7 @@ class RetrievalProcessor:
         retrieval_finished_at = time.time()
 
         stage_timings = {
-            "stage_embeddings": embeddings_end - embeddings_start,
+            "stage_embeddings": embedding_duration,
             "stage_faiss_search": faiss_end - faiss_start,
             "stage_fetch_documents": fetch_end - fetch_start,
             "stage_rerank": retrieval_finished_at - rerank_start,

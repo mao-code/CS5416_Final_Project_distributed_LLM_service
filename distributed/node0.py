@@ -5,6 +5,7 @@ from typing import Dict
 
 import httpx
 from fastapi import FastAPI, HTTPException
+from sentence_transformers import SentenceTransformer
 
 from .config import Settings
 from .models import (
@@ -14,7 +15,7 @@ from .models import (
     RetrievalItem,
     ResultBatch,
 )
-from .utils import opportunistic_batch, write_metrics_row
+from .utils import opportunistic_batch, resolve_device, write_metrics_row
 from memory_profiler import profile
 from .memory_logger import log_peak_memory
 
@@ -26,6 +27,26 @@ class Node0State:
         self.pending: Dict[str, asyncio.Future] = {}
         self.pending_lock = asyncio.Lock()
         self.client = httpx.AsyncClient(timeout=settings.http_timeout)
+        self.embedder = None
+        if settings.node0_embeddings:
+            device = resolve_device(settings.prefer_gpu, settings.only_cpu)
+            self.embedder = SentenceTransformer("BAAI/bge-base-en-v1.5", device=device)
+
+    def encode_batch(self, batch: list[RetrievalItem]) -> tuple[list[list[float]], float]:
+        if not self.embedder:
+            raise RuntimeError("node0 embeddings requested without initialized model")
+        start = time.time()
+        embeddings = (
+            self.embedder.encode(
+                [item.query for item in batch],
+                normalize_embeddings=True,
+                convert_to_numpy=True,
+            )
+            .astype("float32")
+            .tolist()
+        )
+        duration = time.time() - start
+        return embeddings, duration
 
 
 async def _send_to_node1(state: Node0State, batch: list[RetrievalItem]) -> None:
@@ -41,10 +62,26 @@ async def _send_to_node1(state: Node0State, batch: list[RetrievalItem]) -> None:
 
 
 async def dispatcher_loop(state: Node0State) -> None:
+    loop = asyncio.get_running_loop()
     while True:
         batch = await opportunistic_batch(
             state.queue, state.settings.max_batch_size_0, state.settings.batch_timeout_0
         )
+        if state.settings.node0_embeddings:
+            try:
+                embeddings, duration = await loop.run_in_executor(
+                    None, state.encode_batch, batch
+                )
+            except Exception as exc:
+                async with state.pending_lock:
+                    for item in batch:
+                        fut = state.pending.pop(item.request_id, None)
+                        if fut and not fut.done():
+                            fut.set_exception(RuntimeError(f"node0 embedding failed: {exc}"))
+                continue
+            for item, embedding in zip(batch, embeddings):
+                item.embedding = embedding
+                item.stage_embeddings = duration
         await _send_to_node1(state, batch)
 
 @log_peak_memory()

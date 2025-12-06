@@ -11,6 +11,8 @@ class RetrievalItem(BaseModel):
     request_id: str
     query: str
     start_time: float
+    embedding: Optional[List[float]] = None
+    stage_embeddings: Optional[float] = None
 
 
 class RetrievalBatch(BaseModel):
