@@ -177,16 +177,23 @@ class GenerationProcessor:
                 max_length=self.settings.truncate_length,
             ).to(self.device)
             with torch.inference_mode():
-                generated_ids = self.llm_model.generate(
+                outputs = self.llm_model.generate(
                     **model_inputs,
                     max_new_tokens=self.settings.max_tokens,
                     temperature=0.01,
                     pad_token_id=self.llm_tokenizer.eos_token_id,
+                    use_cache=True,
+                    return_dict_in_generate=True,
                 )
-            response = self.llm_tokenizer.batch_decode(
-                generated_ids, skip_special_tokens=True
+            prompt_lengths = model_inputs["attention_mask"].sum(dim=1).tolist()
+            # Slice off the prompt portion once, then batch-decode
+            new_tokens = [
+                seq[start:].tolist()
+                for seq, start in zip(outputs.sequences, prompt_lengths)
+            ]
+            responses.extend(
+                self.llm_tokenizer.batch_decode(new_tokens, skip_special_tokens=True)
             )
-            responses.extend(response)
         return responses
 
     def _analyze_sentiment_batch(self, texts: List[str]) -> List[str]:
