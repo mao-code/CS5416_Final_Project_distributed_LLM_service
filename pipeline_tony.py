@@ -23,6 +23,28 @@ import threading
 import psutil
 import requests
 import msgpack
+import tracemalloc
+import logging
+from memory_profiler import memory_usage
+import multiprocessing as mp
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+mp.set_start_method("spawn", force=True)
+
+logging.basicConfig(
+    filename='memory_use.log', 
+    level=logging.INFO, 
+    format='%(asctime)s — %(message)s'
+)
+
+def log_peak_memory(fn):
+    """TODO: add documentation"""
+    def wrapper(*args, **kwargs):
+        peak_mem = memory_usage((fn, args, kwargs), max_usage=True)
+        msg = f"{fn.__name__} peak memory: {peak_mem} MiB"
+        logging.info(msg)
+        return fn(*args, **kwargs)
+    return wrapper
 
 # Read environment variables
 TOTAL_NODES = int(os.environ.get('TOTAL_NODES', 1))
@@ -53,6 +75,8 @@ results_lock = threading.Lock()
 back_queue = Queue()
 batch_size = 1
 msg = False
+time_metric = True
+memory_metric = False
 
 @dataclass
 class PipelineRequest:
@@ -104,7 +128,8 @@ class FrontPipeline:
 
         self.sentenceTransformer_model = SentenceTransformer(self.embedding_model_name).to(self.device)
         self.faiss_index = faiss.read_index(CONFIG['faiss_index_path'])
-   
+    
+    # @log_peak_memory
     def process_batch(self, requests: List[PipelineRequest]) -> List[PipelineResponse]:
         """
         Main pipeline execution for a batch of requests.
@@ -126,7 +151,8 @@ class FrontPipeline:
         query_embeddings = self._generate_embeddings_batch(queries)
 
         e_time = time.time()
-        print(e_time - s_time)
+        if time_metric:
+            print(e_time - s_time)
         s_time = time.time()
 
         # Step 2: FAISS ANN search
@@ -134,7 +160,8 @@ class FrontPipeline:
         doc_id_batches = self._faiss_search_batch(query_embeddings)
 
         e_time = time.time()
-        print(e_time - s_time)
+        if time_metric:
+            print(e_time - s_time)
 
         json_result = {
             'requests': serialize(requests),
@@ -203,17 +230,21 @@ class BackPipeline:
             model=self.safety_model_name,
             device=self.device
         )
-    
+
+    @log_peak_memory
     def process_batch(self, requests: List[PipelineRequest], start_times: List[float], queries, doc_id_batches) -> List[PipelineResponse]:
 
         s_time = time.time()
+        if memory_metric:
+            tracemalloc.start()
 
         # Step 3: Fetch documents from disk
         print("\n[Step 3/7] Fetching documents for batch...")
         documents_batch = self._fetch_documents_batch(doc_id_batches)
 
         e_time = time.time()
-        print(e_time - s_time)
+        if time_metric:
+            print(e_time - s_time)
         s_time = time.time()
 
         # Step 4: Rerank documents
@@ -224,7 +255,8 @@ class BackPipeline:
         )
 
         e_time = time.time()
-        print(e_time - s_time)
+        if time_metric:
+            print(e_time - s_time)
         s_time = time.time()
         
         # Step 5: Generate LLM responses
@@ -235,7 +267,8 @@ class BackPipeline:
         )
 
         e_time = time.time()
-        print(e_time - s_time)
+        if time_metric:
+            print(e_time - s_time)
         s_time = time.time()
 
         # Step 6: Sentiment analysis
@@ -243,7 +276,8 @@ class BackPipeline:
         sentiments = self._analyze_sentiment_batch(responses_text)
 
         e_time = time.time()
-        print(e_time - s_time)
+        if time_metric:
+            print(e_time - s_time)
         s_time = time.time()
 
         # Step 7: Safety filter on responses
@@ -251,7 +285,8 @@ class BackPipeline:
         toxicity_flags = self._filter_response_safety_batch(responses_text)
         
         e_time = time.time()
-        print(e_time - s_time)
+        if time_metric:
+            print(e_time - s_time)
 
         responses = []
         for idx, request in enumerate(requests):
@@ -394,7 +429,12 @@ def running_frontPipeline():
                 batch.append(req)
                 request_queue.task_done()
             # Process request
-            pipeline.process_batch(batch)
+            def run_and_measure():
+                return pipeline.process_batch(batch)
+
+            peak = memory_usage((run_and_measure, ), max_usage=True)
+            print(f"process_batch peak memory: {peak} MiB")
+            # pipeline.process_batch(batch)
         except Exception as e:
             print(f"Error processing request: {e}")
             request_queue.task_done()
@@ -415,7 +455,14 @@ def running_backPipeline():
         doc_id_batches = data.get('doc_id_batches')
         if not requests or not start_times or not queries or not doc_id_batches:
             return jsonify({'error': 'Missing requests or start_times or queries or doc_id_batches'}), 400
+        if memory_metric:
+            tracemalloc.start()
         result = pipeline.process_batch(requests, start_times, queries, doc_id_batches)
+        if memory_metric:
+            current, peak = tracemalloc.get_traced_memory()
+            print(f"BackPipeline current memory usage: {current / (1024*1024):.2f} MB")
+            print(f"BackPipeline peak memory usage: {peak / (1024*1024):.2f} MB")
+            tracemalloc.stop()
         return jsonify(result)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -533,10 +580,24 @@ def send_to_node_2():
         except Exception as e:
             raise ValueError("Failed to send to node 2")
 
+peak_mem_mb = 0
+
 def main():
     """
     Main execution function
     """
+
+    def monitor_memory():
+        global peak_mem_mb
+        process = psutil.Process()
+        while True:
+            mem = process.memory_info().rss / (1024*1024)
+            peak_mem_mb = max(peak_mem_mb, mem)
+            print("peak mem real: ", peak_mem_mb)
+            time.sleep(2)
+
+    threading.Thread(target=monitor_memory, daemon=True).start()
+
     global pipeline
     
     print("="*60)
