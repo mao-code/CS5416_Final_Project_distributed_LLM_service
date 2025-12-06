@@ -15,6 +15,8 @@ from .models import (
     ResultBatch,
 )
 from .utils import opportunistic_batch, write_metrics_row
+from memory_profiler import profile
+from .memory_logger import log_peak_memory
 
 
 class Node0State:
@@ -45,7 +47,8 @@ async def dispatcher_loop(state: Node0State) -> None:
         )
         await _send_to_node1(state, batch)
 
-
+@log_peak_memory()
+@profile
 def build_app(settings: Settings) -> FastAPI:
     state = Node0State(settings)
     app = FastAPI(title="Node0 Gateway", version="1.0")

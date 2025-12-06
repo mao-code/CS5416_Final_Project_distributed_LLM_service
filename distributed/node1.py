@@ -19,9 +19,13 @@ from .utils import (
     resolve_device,
     write_metrics_row,
 )
+from memory_profiler import profile
+from .memory_logger import log_peak_memory
 
 
 class RetrievalProcessor:
+    @log_peak_memory(node_number=1)
+    @profile # Breakdown of initialization memory allocations
     def __init__(self, settings: Settings):
         self.settings = settings
         self.device = resolve_device(settings.prefer_gpu, settings.only_cpu)
@@ -34,6 +38,7 @@ class RetrievalProcessor:
         self._ensure_indices()
         
 
+    @log_peak_memory(node_number=1)
     def process_batch(self, items: List[RetrievalItem]) -> List[GenerationItem]:
         queries = [item.query for item in items]
         qids = [item.request_id for item in items]

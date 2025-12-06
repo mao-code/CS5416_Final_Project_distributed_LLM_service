@@ -17,9 +17,13 @@ from .utils import (
     resolve_device,
     write_metrics_row,
 )
+from .memory_logger import log_peak_memory
+from memory_profiler import profile
 
 
 class GenerationProcessor:
+    @log_peak_memory(node_number=2)
+    @profile # Breakdown of initialization memory allocations
     def __init__(self, settings: Settings):
         self.settings = settings
         self.device = resolve_device(settings.prefer_gpu, settings.only_cpu)
@@ -41,6 +45,7 @@ class GenerationProcessor:
             device=self.device_index,
         )
 
+    @log_peak_memory(node_number=2)
     def process_batch(self, items: List[GenerationItem]) -> List[PipelineResult]:
         docs = self._fetch_documents(items)
         prompts = [self._build_prompt(item.query, docs.get(item.request_id, [])) for item in items]

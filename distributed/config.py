@@ -76,7 +76,7 @@ class Settings:
             batch_timeout_0=float(os.environ.get("BATCH_TIMEOUT_0", "0.02")),
             max_batch_size_1=int(os.environ.get("MAX_BATCH_SIZE_1", "8")),
             batch_timeout_1=float(os.environ.get("BATCH_TIMEOUT_1", "0.05")),
-            max_batch_size_2=int(os.environ.get("MAX_BATCH_SIZE_2", "2")),
+            max_batch_size_2=int(os.environ.get("MAX_BATCH_SIZE_2", "4")),
             batch_timeout_2=float(os.environ.get("BATCH_TIMEOUT_2", "0.05")),
             http_timeout=float(os.environ.get("HTTP_TIMEOUT", "120")),
             request_timeout=float(os.environ.get("REQUEST_TIMEOUT", "600")),

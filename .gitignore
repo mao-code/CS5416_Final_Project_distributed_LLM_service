@@ -3,3 +3,5 @@ documents/
 .venv/
 __pycache__/
 test.py
+memory_use.log
+mao_request_timings.csv
