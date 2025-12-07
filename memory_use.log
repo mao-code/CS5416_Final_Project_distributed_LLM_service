@@ -1,0 +1,29 @@
+2025-12-06 21:12:09,392 — Use pytorch device_name: cpu
+2025-12-06 21:12:09,392 — Load pretrained SentenceTransformer: BAAI/bge-base-en-v1.5
+2025-12-06 21:13:46,560 — [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on http://localhost:8000
+2025-12-06 21:13:46,560 — [33mPress CTRL+C to quit[0m
+2025-12-06 21:15:40,217 — Use pytorch device_name: cpu
+2025-12-06 21:15:40,217 — Load pretrained SentenceTransformer: BAAI/bge-base-en-v1.5
+2025-12-06 21:16:29,286 — Use pytorch device_name: cpu
+2025-12-06 21:16:29,287 — Load pretrained SentenceTransformer: BAAI/bge-base-en-v1.5
+2025-12-06 21:16:31,930 — [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on http://localhost:8002
+2025-12-06 21:16:31,930 — [33mPress CTRL+C to quit[0m
+2025-12-06 21:17:57,058 — [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on http://localhost:8000
+2025-12-06 21:17:57,058 — [33mPress CTRL+C to quit[0m
+2025-12-06 21:18:33,035 — Use pytorch device_name: cpu
+2025-12-06 21:18:33,036 — Load pretrained SentenceTransformer: BAAI/bge-base-en-v1.5
+2025-12-06 21:19:55,786 — Use pytorch device_name: cpu
+2025-12-06 21:19:55,786 — Load pretrained SentenceTransformer: BAAI/bge-base-en-v1.5
+2025-12-06 21:21:20,284 — [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on http://localhost:8000
+2025-12-06 21:21:20,298 — [33mPress CTRL+C to quit[0m
+2025-12-06 21:21:53,218 — Use pytorch device_name: cpu
+2025-12-06 21:21:53,218 — Load pretrained SentenceTransformer: BAAI/bge-base-en-v1.5
+2025-12-06 21:23:30,220 — [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on http://localhost:8001
+2025-12-06 21:23:30,220 — [33mPress CTRL+C to quit[0m
+2025-12-06 21:28:51,297 — Use pytorch device_name: cpu
+2025-12-06 21:28:51,297 — Load pretrained SentenceTransformer: BAAI/bge-base-en-v1.5

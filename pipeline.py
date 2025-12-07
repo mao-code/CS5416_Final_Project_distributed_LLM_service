@@ -20,7 +20,6 @@ from sentence_transformers import SentenceTransformer
 from flask import Flask, request, jsonify
 from queue import Queue
 import threading
-import psutil
 import requests
 import msgpack
 import tracemalloc
@@ -75,7 +74,7 @@ results_lock = threading.Lock()
 back_queue = Queue()
 batch_size = 1
 msg = False
-time_metric = True
+time_metric = False
 memory_metric = False
 
 @dataclass
@@ -307,25 +306,51 @@ class BackPipeline:
         db_path = f"{CONFIG['documents_path']}/documents.db"
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
-        documents_batch = []
+        doc_cache = {}
         for doc_ids in doc_id_batches:
-            documents = []
+            documents: List[dict] = []
             for doc_id in doc_ids:
+                doc_id_int = int(doc_id)
+                if doc_id_int in doc_cache:
+                    documents.append(doc_cache[doc_id_int])
+                    continue
                 cursor.execute(
                     'SELECT doc_id, title, content, category FROM documents WHERE doc_id = ?',
-                    (doc_id,)
+                    (doc_id_int,)
                 )
                 result = cursor.fetchone()
                 if result:
-                    documents.append({
-                        'doc_id': result[0],
-                        'title': result[1],
-                        'content': result[2],
-                        'category': result[3]
-                    })
+                    record = {
+                        "doc_id": result[0],
+                        "title": result[1],
+                        "content": result[2],
+                        "category": result[3],
+                    }
+                    doc_cache[doc_id_int] = record
+                    documents.append(record)
             documents_batch.append(documents)
-        conn.close()
+        cursor.close()
         return documents_batch
+
+        # documents_batch = []
+        # for doc_ids in doc_id_batches:
+        #     documents = []
+        #     for doc_id in doc_ids:
+        #         cursor.execute(
+        #             'SELECT doc_id, title, content, category FROM documents WHERE doc_id = ?',
+        #             (doc_id,)
+        #         )
+        #         result = cursor.fetchone()
+        #         if result:
+        #             documents.append({
+        #                 'doc_id': result[0],
+        #                 'title': result[1],
+        #                 'content': result[2],
+        #                 'category': result[3]
+        #             })
+        #     documents_batch.append(documents)
+        # conn.close()
+        # return documents_batch
     
     def _rerank_documents_batch(self, queries: List[str], documents_batch: List[List[Dict]]) -> List[List[Dict]]:
         """Step 5: Rerank retrieved documents for each query in the batch"""
@@ -595,8 +620,8 @@ def main():
             peak_mem_mb = max(peak_mem_mb, mem)
             print("peak mem real: ", peak_mem_mb)
             time.sleep(2)
-
-    threading.Thread(target=monitor_memory, daemon=True).start()
+    if memory_metric:
+        threading.Thread(target=monitor_memory, daemon=True).start()
 
     global pipeline
     
