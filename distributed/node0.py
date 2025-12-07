@@ -37,6 +37,7 @@ class Node0State:
             device = resolve_device(settings.prefer_gpu, settings.only_cpu)
             self.embedder = SentenceTransformer("BAAI/bge-base-en-v1.5", device=device)
 
+    @log_peak_memory()
     def encode_batch(self, batch: list[RetrievalItem]) -> tuple[list[list[float]], float]:
         if not self.embedder:
             raise RuntimeError("node0 embeddings requested without initialized model")

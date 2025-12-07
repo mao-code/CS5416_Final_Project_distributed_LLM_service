@@ -30,9 +30,23 @@ TEST_QUERIES = [
     "How long does shipping typically take?"
 ]
 
-# Experiment settings
-REQUEST_COUNTS = [10, 20, 50]
-REQUEST_INTERVALS = [10, 5, 1]
+# Experiment settings: list of (number_of_requests, interval_seconds)
+EXPERIMENTS = [
+    (10, 10),
+    (20, 5),
+    (50, 1),
+]
+
+# Create a custom logger for memory usage
+logger = logging.getLogger('memory_logger')
+logger.setLevel(logging.INFO)
+# Writes to memory_use.log
+fh = logging.FileHandler('memory_use.log')
+fh.setLevel(logging.INFO)
+# Message formatting
+formatter = logging.Formatter('%(asctime)s — %(message)s')
+fh.setFormatter(formatter)
+logger.addHandler(fh)
 
 def send_request_async(
     request_id: str,
@@ -174,9 +188,10 @@ def run_experiment(total: int, interval: float, experiment_idx: int) -> Dict[str
         thread.start()
         threads.append(thread)
     
-    print(f"\n\nWaiting for all responses (up to 5 minutes)...")
+    maxTime = 1800
+    print(f"\n\nWaiting for all responses (up to 30 minutes)...")
     for thread in threads:
-        thread.join(timeout=320)  # 5 min 20 sec to allow for some buffer
+        thread.join(timeout=1800)  # timeout to allow for some buffer
     
     total_time = time.time() - start_time
     print("\n" + "="*70)
@@ -234,8 +249,7 @@ def main():
     print("ML INFERENCE PIPELINE CLIENT")
     print("="*70)
     print(f"Server URL: {SERVER_URL}")
-    print(f"Request counts: {REQUEST_COUNTS}")
-    print(f"Intervals (s): {REQUEST_INTERVALS}")
+    print(f"Experiments (total, interval_s): {EXPERIMENTS}")
     print("="*70)
     
     # Check if server is healthy once before experiments
@@ -251,12 +265,14 @@ def main():
     experiment_counter = 1
     all_summaries = []
 
-    for total in REQUEST_COUNTS:
-        for interval in REQUEST_INTERVALS:
-            # logger.info(f"Beginning experiment with n = {total} requests, sent at an interval of t = {interval} seconds")
-            summary = run_experiment(total, interval, experiment_counter)
-            all_summaries.append((experiment_counter, summary))
-            experiment_counter += 1
+    for total, interval in EXPERIMENTS:
+        logger.info(
+            f"Beginning experiment with n = {total} requests, sent at an interval of t = {interval} seconds"
+        )
+        mark_experiment_in_metrics(total, interval)
+        summary = run_experiment(total, interval, experiment_counter)
+        all_summaries.append((experiment_counter, summary))
+        experiment_counter += 1
 
     print("\n" + "="*70)
     print("ALL EXPERIMENTS COMPLETE")
