@@ -83,6 +83,7 @@ class Node0Work:
         self.llm_model_name = 'Qwen/Qwen2.5-0.5B-Instruct'
         self.sentiment_model_name = 'nlptown/bert-base-multilingual-uncased-sentiment'
         self.safety_model_name = 'unitary/toxic-bert'
+        self.model = SentenceTransformer(self.embedding_model_name).to(self.device)
     
     def process_request(self, request: PipelineRequest) -> PipelineResponse:
         """
@@ -144,14 +145,11 @@ class Node0Work:
     
     def _generate_embeddings_batch(self, texts: List[str]) -> np.ndarray:
         """Step 2: Generate embeddings for a batch of queries"""
-        model = SentenceTransformer(self.embedding_model_name).to(self.device)
-        embeddings = model.encode(
+        embeddings = self.model.encode(
             texts,
             normalize_embeddings=True,
             convert_to_numpy=True
         )
-        del model
-        gc.collect()
         return embeddings
     
 class Node1Work:
@@ -173,6 +171,10 @@ class Node1Work:
         self.llm_model_name = 'Qwen/Qwen2.5-0.5B-Instruct'
         self.sentiment_model_name = 'nlptown/bert-base-multilingual-uncased-sentiment'
         self.safety_model_name = 'unitary/toxic-bert'
+        self.index = faiss.read_index(CONFIG['faiss_index_path'])
+        self.conn = sqlite3.connect(db_path)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.reranker_model_name)
+        self.model = AutoModelForSequenceClassification.from_pretrained(self.reranker_model_name).to(self.device)
     
 
     def process_batch(self, query_embeddings: np.ndarray, queries: List[str]) -> List[List[Dict]]:
@@ -202,18 +204,14 @@ class Node1Work:
             raise FileNotFoundError("FAISS index not found. Please create the index before running the pipeline.")
         
         print("Loading FAISS index")
-        index = faiss.read_index(CONFIG['faiss_index_path'])
         query_embeddings = query_embeddings.astype('float32')
-        _, indices = index.search(query_embeddings, CONFIG['retrieval_k'])
-        del index
-        gc.collect()
+        _, indices = self.index.search(query_embeddings, CONFIG['retrieval_k'])
         return [row.tolist() for row in indices]
     
     def _fetch_documents_batch(self, doc_id_batches: List[List[int]]) -> List[List[Dict]]:
         """Step 4: Fetch documents for each query in the batch using SQLite"""
         db_path = f"{CONFIG['documents_path']}/documents.db"
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
+        cursor = self.conn.cursor()
         documents_batch = []
         for doc_ids in doc_id_batches:
             documents = []
@@ -231,14 +229,12 @@ class Node1Work:
                         'category': result[3]
                     })
             documents_batch.append(documents)
-        conn.close()
+        cursor.close()
         return documents_batch
     
     def _rerank_documents_batch(self, queries: List[str], documents_batch: List[List[Dict]]) -> List[List[Dict]]:
         """Step 5: Rerank retrieved documents for each query in the batch"""
-        tokenizer = AutoTokenizer.from_pretrained(self.reranker_model_name)
-        model = AutoModelForSequenceClassification.from_pretrained(self.reranker_model_name).to(self.device)
-        model.eval()
+        self.model.eval()
         reranked_batches = []
         for query, documents in zip(queries, documents_batch):
             if not documents:
@@ -246,19 +242,17 @@ class Node1Work:
                 continue
             pairs = [[query, doc['content']] for doc in documents]
             with torch.no_grad():
-                inputs = tokenizer(
+                inputs = self.tokenizer(
                     pairs,
                     padding=True,
                     truncation=True,
                     return_tensors='pt',
                     max_length=CONFIG['truncate_length']
                 ).to(self.device)
-                scores = model(**inputs, return_dict=True).logits.view(-1, ).float()
+                scores = self.model(**inputs, return_dict=True).logits.view(-1, ).float()
             doc_scores = list(zip(documents, scores))
             doc_scores.sort(key=lambda x: x[1], reverse=True)
             reranked_batches.append([doc for doc, _ in doc_scores])
-        del model, tokenizer
-        gc.collect()
         return reranked_batches
 
 
@@ -281,6 +275,22 @@ class Node2Work:
         self.llm_model_name = 'Qwen/Qwen2.5-0.5B-Instruct'
         self.sentiment_model_name = 'nlptown/bert-base-multilingual-uncased-sentiment'
         self.safety_model_name = 'unitary/toxic-bert'
+
+        self.model = AutoModelForCausalLM.from_pretrained(
+            self.llm_model_name,
+            dtype=torch.float16,
+        ).to(self.device)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.llm_model_name)
+        self.classifier = hf_pipeline(
+            "sentiment-analysis",
+            model=self.sentiment_model_name,
+            device=self.device
+        )
+        self.classifier2 = hf_pipeline(
+            "text-classification",
+            model=self.safety_model_name,
+            device=self.device
+        )
 
     def process_batch(self, requests: List[PipelineRequest], queries: List[str], reranked_docs_batch: List[List[Dict]], start_times: list[float]) -> List[PipelineResponse]:
         """
@@ -318,11 +328,6 @@ class Node2Work:
     
     def _generate_responses_batch(self, queries: List[str], documents_batch: List[List[Dict]]) -> List[str]:
         """Step 6: Generate LLM responses for each query in the batch"""
-        model = AutoModelForCausalLM.from_pretrained(
-            self.llm_model_name,
-            dtype=torch.float16,
-        ).to(self.device)
-        tokenizer = AutoTokenizer.from_pretrained(self.llm_model_name)
         responses = []
         for query, documents in zip(queries, documents_batch):
             context = "\n".join([f"- {doc['title']}: {doc['content'][:200]}" for doc in documents[:3]])
@@ -332,36 +337,29 @@ class Node2Work:
                 {"role": "user",
                  "content": f"Context:\n{context}\n\nQuestion: {query}\n\nAnswer:"}
             ]
-            text = tokenizer.apply_chat_template(
+            text = self.tokenizer.apply_chat_template(
                 messages,
                 tokenize=False,
                 add_generation_prompt=True
             )
-            model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
-            generated_ids = model.generate(
+            model_inputs = self.tokenizer([text], return_tensors="pt").to(self.model.device)
+            generated_ids = self.model.generate(
                 **model_inputs,
                 max_new_tokens=CONFIG['max_tokens'],
                 temperature=0.01,
-                pad_token_id=tokenizer.eos_token_id
+                pad_token_id=self.tokenizer.eos_token_id
             )
             generated_ids = [
                 output_ids[len(input_ids):] for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
             ]
-            response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+            response = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
             responses.append(response)
-        del model, tokenizer
-        gc.collect()
         return responses
     
     def _analyze_sentiment_batch(self, texts: List[str]) -> List[str]:
         """Step 7: Analyze sentiment for each generated response"""
-        classifier = hf_pipeline(
-            "sentiment-analysis",
-            model=self.sentiment_model_name,
-            device=self.device
-        )
         truncated_texts = [text[:CONFIG['truncate_length']] for text in texts]
-        raw_results = classifier(truncated_texts)
+        raw_results = self.classifier(truncated_texts)
         sentiment_map = {
             '1 star': 'very negative',
             '2 stars': 'negative',
@@ -372,24 +370,15 @@ class Node2Work:
         sentiments = []
         for result in raw_results:
             sentiments.append(sentiment_map.get(result['label'], 'neutral'))
-        del classifier
-        gc.collect()
         return sentiments
     
     def _filter_response_safety_batch(self, texts: List[str]) -> List[bool]:
         """Step 8: Filter responses for safety for each entry in the batch"""
-        classifier = hf_pipeline(
-            "text-classification",
-            model=self.safety_model_name,
-            device=self.device
-        )
         truncated_texts = [text[:CONFIG['truncate_length']] for text in texts]
-        raw_results = classifier(truncated_texts)
+        raw_results = self.classifier2(truncated_texts)
         toxicity_flags = []
         for result in raw_results:
             toxicity_flags.append(result['score'] > 0.5)
-        del classifier
-        gc.collect()
         return toxicity_flags
     
 
