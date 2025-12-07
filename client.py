@@ -14,6 +14,8 @@ from typing import Dict
 
 # Read NODE_0_IP from environment variable
 NODE_0_IP = os.environ.get('NODE_0_IP', 'localhost:8000')
+NODE_1_IP = os.environ.get('NODE_1_IP', 'localhost:8001')
+NODE_2_IP = os.environ.get('NODE_2_IP', 'localhost:8002')
 SERVER_URL = f"http://{NODE_0_IP}/query"
 
 # Test queries
@@ -114,6 +116,33 @@ def send_request_async(
                 'send_time': send_time,
                 'success': False
             }
+
+
+def mark_experiment_in_metrics(total: int, interval: float) -> None:
+    """
+    Ask each node to append a separator/comment to its metrics CSV so results
+    from different experiments are easier to spot.
+    """
+    label = (
+        f"---- experiment: {total} requests @ {interval}s "
+        f"({datetime.now().isoformat(timespec='seconds')}) ----"
+    )
+    targets = [
+        ("node0", NODE_0_IP),
+        ("node1", NODE_1_IP),
+        ("node2", NODE_2_IP),
+    ]
+    for name, host in targets:
+        try:
+            resp = requests.post(
+                f"http://{host}/mark_experiment",
+                json={"label": label},
+                timeout=5,
+            )
+            if resp.status_code != 200:
+                print(f"[metrics] {name} marker failed: HTTP {resp.status_code}")
+        except Exception as exc:
+            print(f"[metrics] {name} marker failed: {exc}")
 
 
 def run_experiment(total: int, interval: float, experiment_idx: int) -> Dict[str, float]:

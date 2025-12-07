@@ -7,13 +7,14 @@ import faiss
 import httpx
 import numpy as np
 import torch
-from fastapi import FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException
 from sentence_transformers import SentenceTransformer
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from .config import Settings
 from .models import GenerationBatch, GenerationItem, RetrievalBatch, RetrievalItem
 from .utils import (
+    append_metrics_separator,
     ensure_document_indices,
     opportunistic_batch,
     resolve_device,
@@ -211,23 +212,10 @@ def build_app(settings: Settings) -> FastAPI:
 
     @app.on_event("startup")
     async def _startup() -> None:
-        app.state.tasks = [asyncio.create_task(worker_loop(state))]
-
-    async def _startup() -> None:
-        # Insert a blank line to separate experiments in the metrics CSV
         if settings.metrics_enabled and settings.metrics_csv_path:
-            path = Path(settings.metrics_csv_path)
-            try:
-                # Only add a separator if the file already has content
-                if path.exists() and path.stat().st_size > 0:
-                    with path.open("a", newline="") as f:
-                        f.write("\n")
-                    # Optionally: write a comment-like marker instead of pure blank line
-                    f.write("# ---- new experiment ----\n")
-            except Exception:
-                # Don't crash startup because of metrics separation
-                pass
-
+            append_metrics_separator(
+                settings.metrics_csv_path, "---- node1 startup ----"
+            )
         app.state.tasks = [asyncio.create_task(worker_loop(state))]
 
 
@@ -251,6 +239,14 @@ def build_app(settings: Settings) -> FastAPI:
             "queued": state.queue.qsize(),
             "device": str(state.processor.device),
         }
+
+    @app.post("/mark_experiment")
+    async def mark_experiment(label: str = Body(None, embed=True)) -> dict:
+        if settings.metrics_enabled and settings.metrics_csv_path:
+            append_metrics_separator(
+                settings.metrics_csv_path, label or "---- new experiment ----"
+            )
+        return {"ok": True}
 
     return app
 
