@@ -101,7 +101,8 @@ def build_app(settings: Settings) -> FastAPI:
             append_metrics_separator(
                 settings.metrics_csv_path, "---- node0 startup ----"
             )
-        app.state.tasks = [asyncio.create_task(worker_loop(state))]
+        app.state.tasks = [asyncio.create_task(dispatcher_loop(state))]
+        
     @app.on_event("shutdown")
     async def _shutdown() -> None:
         for task in getattr(app.state, "tasks", []):
