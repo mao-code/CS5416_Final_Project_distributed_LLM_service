@@ -22,28 +22,10 @@ from queue import Queue
 import threading
 import requests
 import msgpack
-import tracemalloc
-import logging
 from memory_profiler import memory_usage
 import multiprocessing as mp
+import psutil
 
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-mp.set_start_method("spawn", force=True)
-
-logging.basicConfig(
-    filename='memory_use.log', 
-    level=logging.INFO, 
-    format='%(asctime)s — %(message)s'
-)
-
-def log_peak_memory(fn):
-    """TODO: add documentation"""
-    def wrapper(*args, **kwargs):
-        peak_mem = memory_usage((fn, args, kwargs), max_usage=True)
-        msg = f"{fn.__name__} peak memory: {peak_mem} MiB"
-        logging.info(msg)
-        return fn(*args, **kwargs)
-    return wrapper
 
 # Read environment variables
 TOTAL_NODES = int(os.environ.get('TOTAL_NODES', 1))
@@ -128,7 +110,7 @@ class FrontPipeline:
         self.sentenceTransformer_model = SentenceTransformer(self.embedding_model_name).to(self.device)
         self.faiss_index = faiss.read_index(CONFIG['faiss_index_path'])
     
-    # @log_peak_memory
+
     def process_batch(self, requests: List[PipelineRequest]) -> List[PipelineResponse]:
         """
         Main pipeline execution for a batch of requests.
@@ -230,12 +212,9 @@ class BackPipeline:
             device=self.device
         )
 
-    @log_peak_memory
     def process_batch(self, requests: List[PipelineRequest], start_times: List[float], queries, doc_id_batches) -> List[PipelineResponse]:
 
         s_time = time.time()
-        if memory_metric:
-            tracemalloc.start()
 
         # Step 3: Fetch documents from disk
         print("\n[Step 3/7] Fetching documents for batch...")
@@ -306,6 +285,7 @@ class BackPipeline:
         db_path = f"{CONFIG['documents_path']}/documents.db"
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
+        documents_batch = []
         doc_cache = {}
         for doc_ids in doc_id_batches:
             documents: List[dict] = []
@@ -453,13 +433,7 @@ def running_frontPipeline():
                 )
                 batch.append(req)
                 request_queue.task_done()
-            # Process request
-            def run_and_measure():
-                return pipeline.process_batch(batch)
-
-            peak = memory_usage((run_and_measure, ), max_usage=True)
-            print(f"process_batch peak memory: {peak} MiB")
-            # pipeline.process_batch(batch)
+            pipeline.process_batch(batch)
         except Exception as e:
             print(f"Error processing request: {e}")
             request_queue.task_done()
@@ -480,14 +454,7 @@ def running_backPipeline():
         doc_id_batches = data.get('doc_id_batches')
         if not requests or not start_times or not queries or not doc_id_batches:
             return jsonify({'error': 'Missing requests or start_times or queries or doc_id_batches'}), 400
-        if memory_metric:
-            tracemalloc.start()
         result = pipeline.process_batch(requests, start_times, queries, doc_id_batches)
-        if memory_metric:
-            current, peak = tracemalloc.get_traced_memory()
-            print(f"BackPipeline current memory usage: {current / (1024*1024):.2f} MB")
-            print(f"BackPipeline peak memory usage: {peak / (1024*1024):.2f} MB")
-            tracemalloc.stop()
         return jsonify(result)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
