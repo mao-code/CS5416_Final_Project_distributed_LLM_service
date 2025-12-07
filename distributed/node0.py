@@ -92,8 +92,21 @@ def build_app(settings: Settings) -> FastAPI:
 
     @app.on_event("startup")
     async def _startup() -> None:
-        app.state.tasks = [asyncio.create_task(dispatcher_loop(state))]
+        # Insert a blank line to separate experiments in the metrics CSV
+        if settings.metrics_enabled and settings.metrics_csv_path:
+            path = Path(settings.metrics_csv_path)
+            try:
+                # Only add a separator if the file already has content
+                if path.exists() and path.stat().st_size > 0:
+                    with path.open("a", newline="") as f:
+                        f.write("\n")
+                    # Optionally: write a comment-like marker instead of pure blank line
+                    f.write("# ---- new experiment ----\n")
+            except Exception:
+                # Don't crash startup because of metrics separation
+                pass
 
+        app.state.tasks = [asyncio.create_task(worker_loop(state))]
     @app.on_event("shutdown")
     async def _shutdown() -> None:
         for task in getattr(app.state, "tasks", []):
