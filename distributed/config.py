@@ -85,5 +85,5 @@ class Settings:
             metrics_enabled=_get_bool("METRICS_ENABLED", True),
             prefer_gpu=_get_bool("USE_GPU", False),
             only_cpu=_get_bool("ONLY_CPU", True),
-            node0_embeddings=_get_bool("NODE0_EMBEDDINGS", False),
+            node0_embeddings=_get_bool("NODE0_EMBEDDINGS", True),
         )

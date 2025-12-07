@@ -109,7 +109,7 @@ def main():
     Requests are sent at fixed intervals regardless of response time
     """
     total = 20
-    interval = 1
+    interval = 3
 
     print("="*70)
     print("ML INFERENCE PIPELINE CLIENT")

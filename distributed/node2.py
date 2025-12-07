@@ -33,7 +33,13 @@ class GenerationProcessor:
 
         # Heavy models loaded once
         self.llm_tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
-        self.llm_model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct").to(self.device) # TODO: try half precision
+        self.llm_model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct").to(self.device)
+        # half precision (only work for GPU, CPU is optimized for float32)
+        # self.llm_model = AutoModelForCausalLM.from_pretrained(
+        #     "Qwen/Qwen2.5-0.5B-Instruct",
+        #     torch_dtype=torch.float16
+        # ).to(self.device)
+
         self.classifier = hf_pipeline(
             "sentiment-analysis",
             model="nlptown/bert-base-multilingual-uncased-sentiment",
