@@ -34,17 +34,6 @@ TEST_QUERIES = [
 REQUEST_COUNTS = [10, 20, 50]
 REQUEST_INTERVALS = [10, 5, 1]
 
-# Create a custom logger for memory usage
-logger = logging.getLogger('memory_logger')
-logger.setLevel(logging.INFO)
-# Writes to memory_use.log
-fh = logging.FileHandler('memory_use.log')
-fh.setLevel(logging.INFO)
-# Message formatting
-formatter = logging.Formatter('%(asctime)s — %(message)s')
-fh.setFormatter(formatter)
-logger.addHandler(fh)
-
 def send_request_async(
     request_id: str,
     query: str,
@@ -264,7 +253,7 @@ def main():
 
     for total in REQUEST_COUNTS:
         for interval in REQUEST_INTERVALS:
-            logger.info(f"Beginning experiment with n = {total} requests, sent at an interval of t = {interval} seconds")
+            # logger.info(f"Beginning experiment with n = {total} requests, sent at an interval of t = {interval} seconds")
             summary = run_experiment(total, interval, experiment_counter)
             all_summaries.append((experiment_counter, summary))
             experiment_counter += 1

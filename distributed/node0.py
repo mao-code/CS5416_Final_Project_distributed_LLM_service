@@ -66,6 +66,7 @@ async def _send_to_node1(state: Node0State, batch: list[RetrievalItem]) -> None:
                     fut.set_exception(RuntimeError(f"node1 dispatch failed: {exc}"))
 
 
+@log_peak_memory()
 async def dispatcher_loop(state: Node0State) -> None:
     loop = asyncio.get_running_loop()
     while True:
