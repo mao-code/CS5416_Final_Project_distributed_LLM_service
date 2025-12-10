@@ -24,6 +24,8 @@ import psutil
 import requests
 import msgpack
 
+from .memory_logger import log_peak_memory
+
 # Read environment variables
 TOTAL_NODES = int(os.environ.get('TOTAL_NODES', 1))
 NODE_NUMBER = int(os.environ.get('NODE_NUMBER', 0))
