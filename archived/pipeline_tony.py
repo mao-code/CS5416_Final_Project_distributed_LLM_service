@@ -95,6 +95,7 @@ class FrontPipeline:
     Deliberately inefficient monolithic pipeline
     """
     
+    @log_peak_memory()
     def __init__(self):
         self.device = torch.device('cpu')
         print("FrontPipeline")
@@ -113,6 +114,7 @@ class FrontPipeline:
         self.reranker_model = AutoModelForSequenceClassification.from_pretrained(self.reranker_model_name).to(self.device)
         self.reranker_model.eval()
    
+    @log_peak_memory()
     def process_batch(self, requests: List[PipelineRequest]) -> List[PipelineResponse]:
         global next_node
         """
@@ -251,7 +253,7 @@ class FrontPipeline:
         return reranked_batches
 
 class BackPipeline:
-
+    @log_peak_memory()
     def __init__(self):
         self.device = torch.device('cpu')
         print("BackPipeline")
@@ -281,6 +283,7 @@ class BackPipeline:
             device=self.device
         )
     
+    @log_peak_memory()
     def process_batch(self, requests: List[PipelineRequest], start_times: List[float], queries, reranked_docs_batch) -> List[PipelineResponse]:
         if time_metric:
             s_time = time.time()
@@ -387,7 +390,6 @@ class BackPipeline:
 # Global pipeline instance
 pipeline = None
 
-@log_peak_memory(node_number=0)
 def running_frontPipeline():
     """Worker thread that processes requests from the queue"""
     global pipeline
@@ -484,7 +486,6 @@ def health():
         'total_nodes': TOTAL_NODES
     }), 200
 
-@log_peak_memory(node_number=1)
 def send_to_node_1():
     global msg
     while True:
@@ -515,7 +516,6 @@ def send_to_node_1():
         except Exception as e:
                 raise ValueError("Failed to send to node 1")
 
-@log_peak_memory(node_number=2)
 def send_to_node_2():
     global msg
     while True:
