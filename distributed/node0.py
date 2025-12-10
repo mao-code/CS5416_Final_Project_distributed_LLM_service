@@ -4,7 +4,7 @@ import time
 from typing import Dict
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException
 from sentence_transformers import SentenceTransformer
 
 from .config import Settings
@@ -15,7 +15,12 @@ from .models import (
     RetrievalItem,
     ResultBatch,
 )
-from .utils import opportunistic_batch, resolve_device, write_metrics_row
+from .utils import (
+    append_metrics_separator,
+    opportunistic_batch,
+    resolve_device,
+    write_metrics_row,
+)
 from memory_profiler import profile
 from .memory_logger import log_peak_memory
 
@@ -32,6 +37,7 @@ class Node0State:
             device = resolve_device(settings.prefer_gpu, settings.only_cpu)
             self.embedder = SentenceTransformer("BAAI/bge-base-en-v1.5", device=device)
 
+    @log_peak_memory()
     def encode_batch(self, batch: list[RetrievalItem]) -> tuple[list[list[float]], float]:
         if not self.embedder:
             raise RuntimeError("node0 embeddings requested without initialized model")
@@ -61,6 +67,7 @@ async def _send_to_node1(state: Node0State, batch: list[RetrievalItem]) -> None:
                     fut.set_exception(RuntimeError(f"node1 dispatch failed: {exc}"))
 
 
+@log_peak_memory()
 async def dispatcher_loop(state: Node0State) -> None:
     loop = asyncio.get_running_loop()
     while True:
@@ -92,8 +99,12 @@ def build_app(settings: Settings) -> FastAPI:
 
     @app.on_event("startup")
     async def _startup() -> None:
+        if settings.metrics_enabled and settings.metrics_csv_path:
+            append_metrics_separator(
+                settings.metrics_csv_path, "---- node0 startup ----"
+            )
         app.state.tasks = [asyncio.create_task(dispatcher_loop(state))]
-
+        
     @app.on_event("shutdown")
     async def _shutdown() -> None:
         for task in getattr(app.state, "tasks", []):
@@ -148,6 +159,14 @@ def build_app(settings: Settings) -> FastAPI:
             "node": settings.node_number,
             "queued": state.queue.qsize(),
         }
+
+    @app.post("/mark_experiment")
+    async def mark_experiment(label: str = Body(None, embed=True)) -> dict:
+        if settings.metrics_enabled and settings.metrics_csv_path:
+            append_metrics_separator(
+                settings.metrics_csv_path, label or "---- new experiment ----"
+            )
+        return {"ok": True}
 
     return app
 

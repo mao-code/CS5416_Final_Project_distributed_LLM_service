@@ -95,3 +95,26 @@ def write_metrics_row(path: str, row: dict) -> None:
         if write_header:
             writer.writeheader()
         writer.writerow(row)
+
+
+def append_metrics_separator(path: str, label: str | None = None) -> None:
+    """
+    Append a blank line and optional label to the metrics CSV to separate runs.
+    The blank line is only added if the file already has content to avoid
+    leading newlines.
+    """
+    if not path:
+        return
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    try:
+        file_exists = os.path.exists(path)
+        has_content = os.path.getsize(path) > 0 if file_exists else False
+        with open(path, "a", newline="") as csvfile:
+            if has_content:
+                csvfile.write("\n")
+            if label:
+                csvfile.write(f"# {label}\n")
+            elif has_content:
+                csvfile.write("# ---- new experiment ----\n")
+    except Exception:
+        return

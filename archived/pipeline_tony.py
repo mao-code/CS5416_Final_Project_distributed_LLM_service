@@ -198,6 +198,7 @@ class FrontPipeline:
         db_path = f"{CONFIG['documents_path']}/documents.db"
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
+        documents_batch = []
         doc_cache = {}
         documents_batch = []
         for doc_ids in doc_id_batches:
@@ -405,7 +406,6 @@ def running_frontPipeline():
                 )
                 batch.append(req)
                 request_queue.task_done()
-            # Process request
             pipeline.process_batch(batch)
         except Exception as e:
             print(f"Error processing request: {e}")

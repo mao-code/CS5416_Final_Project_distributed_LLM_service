@@ -5,13 +5,14 @@ from typing import Dict, List
 
 import httpx
 import torch
-from fastapi import FastAPI
+from fastapi import Body, FastAPI
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline as hf_pipeline
 
 from .config import Settings
 from .models import GenerationBatch, GenerationItem, PipelineResult, ResultBatch
 from .utils import (
     chunked,
+    append_metrics_separator,
     ensure_document_indices,
     opportunistic_batch,
     resolve_device,
@@ -33,7 +34,13 @@ class GenerationProcessor:
 
         # Heavy models loaded once
         self.llm_tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
-        self.llm_model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct").to(self.device) # TODO: try half precision
+        self.llm_model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct").to(self.device)
+        # half precision (only work for GPU, CPU is optimized for float32)
+        # self.llm_model = AutoModelForCausalLM.from_pretrained(
+        #     "Qwen/Qwen2.5-0.5B-Instruct",
+        #     torch_dtype=torch.float16
+        # ).to(self.device)
+
         self.classifier = hf_pipeline(
             "sentiment-analysis",
             model="nlptown/bert-base-multilingual-uncased-sentiment",
@@ -274,6 +281,10 @@ def build_app(settings: Settings) -> FastAPI:
 
     @app.on_event("startup")
     async def _startup() -> None:
+        if settings.metrics_enabled and settings.metrics_csv_path:
+            append_metrics_separator(
+                settings.metrics_csv_path, "---- node2 startup ----"
+            )
         app.state.tasks = [asyncio.create_task(worker_loop(state))]
 
     @app.on_event("shutdown")
@@ -296,5 +307,13 @@ def build_app(settings: Settings) -> FastAPI:
             "queued": state.queue.qsize(),
             "device": str(state.processor.device),
         }
+
+    @app.post("/mark_experiment")
+    async def mark_experiment(label: str = Body(None, embed=True)) -> dict:
+        if settings.metrics_enabled and settings.metrics_csv_path:
+            append_metrics_separator(
+                settings.metrics_csv_path, label or "---- new experiment ----"
+            )
+        return {"ok": True}
 
     return app

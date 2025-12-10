@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """
 Client script for testing the ML inference pipeline.
-Sends one request every 10 seconds for 1 minute (6 requests total).
-Requests are sent at fixed intervals regardless of response time.
+Runs multiple experiments with varying request counts and intervals.
 """
 
+import logging
 import os
 import time
 import requests
-import json
 import threading
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict
 
 # Read NODE_0_IP from environment variable
 NODE_0_IP = os.environ.get('NODE_0_IP', 'localhost:8000')
+NODE_1_IP = os.environ.get('NODE_1_IP', 'localhost:8001')
+NODE_2_IP = os.environ.get('NODE_2_IP', 'localhost:8002')
 SERVER_URL = f"http://{NODE_0_IP}/query"
 
 # Test queries
@@ -29,14 +30,31 @@ TEST_QUERIES = [
     "How long does shipping typically take?"
 ]
 
-# Shared data structures
-results = {}
-results_lock = threading.Lock()
-requests_sent = []
-requests_lock = threading.Lock()
+# Experiment settings: list of (number_of_requests, interval_seconds)
+EXPERIMENTS = [
+    (10, 10),
+    (20, 5),
+    (50, 1),
+]
 
+# Create a custom logger for memory usage
+logger = logging.getLogger('memory_logger')
+logger.setLevel(logging.INFO)
+# Writes to memory_use.log
+fh = logging.FileHandler('memory_use.log')
+fh.setLevel(logging.INFO)
+# Message formatting
+formatter = logging.Formatter('%(asctime)s — %(message)s')
+fh.setFormatter(formatter)
+logger.addHandler(fh)
 
-def send_request_async(request_id: str, query: str, send_time: float):
+def send_request_async(
+    request_id: str,
+    query: str,
+    send_time: float,
+    results: Dict[str, dict],
+    results_lock: threading.Lock,
+):
     """Send a single request to the server asynchronously"""
     try:
         print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Sending request {request_id}")
@@ -103,40 +121,49 @@ def send_request_async(request_id: str, query: str, send_time: float):
             }
 
 
-def main():
+def mark_experiment_in_metrics(total: int, interval: float) -> None:
     """
-    Main function: sends requests every 10 seconds for 1 minute
-    Requests are sent at fixed intervals regardless of response time
+    Ask each node to append a separator/comment to its metrics CSV so results
+    from different experiments are easier to spot.
     """
-    total = 20
-    interval = 1
+    label = (
+        f"---- experiment: {total} requests @ {interval}s "
+        f"({datetime.now().isoformat(timespec='seconds')}) ----"
+    )
+    targets = [
+        ("node0", NODE_0_IP),
+        ("node1", NODE_1_IP),
+        ("node2", NODE_2_IP),
+    ]
+    for name, host in targets:
+        try:
+            resp = requests.post(
+                f"http://{host}/mark_experiment",
+                json={"label": label},
+                timeout=5,
+            )
+            if resp.status_code != 200:
+                print(f"[metrics] {name} marker failed: HTTP {resp.status_code}")
+        except Exception as exc:
+            print(f"[metrics] {name} marker failed: {exc}")
 
-    print("="*70)
-    print("ML INFERENCE PIPELINE CLIENT")
-    print("="*70)
-    print(f"Server URL: {SERVER_URL}")
-    print(f"Sending {total} requests")
-    print("="*70)
-    
-    # Check if server is healthy
-    try:
-        health_response = requests.get(f"http://{NODE_0_IP}/health", timeout=5)
-        if health_response.status_code == 200:
-            print(f"Server is healthy: {health_response.json()}")
-        else:
-            print(f"Server health check returned status {health_response.status_code}")
-    except:
-        print(f"Could not reach server health endpoint")
+
+def run_experiment(total: int, interval: float, experiment_idx: int) -> Dict[str, float]:
+    """Run a single experiment with a given request count and interval."""
+    results: Dict[str, dict] = {}
+    requests_sent = []
+    results_lock = threading.Lock()
+    requests_lock = threading.Lock()
+
+    print(f"\nStarting experiment {experiment_idx}: {total} requests, interval {interval}s")
     
     start_time = time.time()
     threads = []
     
     # Send "total" requests at "interval"-second intervals
     for i in range(total):
-        # Calculate when this request should be sent
         target_send_time = start_time + (i * interval)
         
-        # Wait until the target send time
         current_time = time.time()
         if current_time < target_send_time:
             wait_time = target_send_time - current_time
@@ -144,7 +171,6 @@ def main():
                 print(f"\nWaiting {wait_time:.2f}s before next request...")
             time.sleep(wait_time)
         
-        # Send request in a separate thread
         request_id = f"req_{int(time.time())}_{i}"
         query = TEST_QUERIES[i % len(TEST_QUERIES)]
         
@@ -157,20 +183,19 @@ def main():
         
         thread = threading.Thread(
             target=send_request_async,
-            args=(request_id, query, time.time())
+            args=(request_id, query, time.time(), results, results_lock)
         )
         thread.start()
         threads.append(thread)
     
-    # Wait for all threads to complete (with a reasonable timeout)
-    print(f"\n\nWaiting for all responses (up to 5 minutes)...")
+    maxTime = 1800
+    print(f"\n\nWaiting for all responses (up to 30 minutes)...")
     for thread in threads:
-        thread.join(timeout=320)  # 5 min 20 sec to allow for some buffer
+        thread.join(timeout=1800)  # timeout to allow for some buffer
     
-    # Print summary
     total_time = time.time() - start_time
     print("\n" + "="*70)
-    print("SUMMARY")
+    print(f"SUMMARY - Experiment {experiment_idx}")
     print("="*70)
     print(f"Total requests sent: {total}")
     
@@ -205,6 +230,59 @@ def main():
                         print(f"   ⏳ Still pending or not received")
     
     print("\n" + "="*70)
+
+    return {
+        'total': total,
+        'interval': interval,
+        'successful': successful,
+        'failed': total - successful,
+        'elapsed_time': total_time,
+    }
+
+
+def main():
+    """
+    Main function: runs every combination of request counts and intervals.
+    Requests are sent at fixed intervals regardless of response time.
+    """
+    print("="*70)
+    print("ML INFERENCE PIPELINE CLIENT")
+    print("="*70)
+    print(f"Server URL: {SERVER_URL}")
+    print(f"Experiments (total, interval_s): {EXPERIMENTS}")
+    print("="*70)
+    
+    # Check if server is healthy once before experiments
+    try:
+        health_response = requests.get(f"http://{NODE_0_IP}/health", timeout=5)
+        if health_response.status_code == 200:
+            print(f"Server is healthy: {health_response.json()}")
+        else:
+            print(f"Server health check returned status {health_response.status_code}")
+    except Exception:
+        print("Could not reach server health endpoint")
+    
+    experiment_counter = 1
+    all_summaries = []
+
+    for total, interval in EXPERIMENTS:
+        logger.info(
+            f"Beginning experiment with n = {total} requests, sent at an interval of t = {interval} seconds"
+        )
+        mark_experiment_in_metrics(total, interval)
+        summary = run_experiment(total, interval, experiment_counter)
+        all_summaries.append((experiment_counter, summary))
+        experiment_counter += 1
+
+    print("\n" + "="*70)
+    print("ALL EXPERIMENTS COMPLETE")
+    print("="*70)
+    for idx, summary in all_summaries:
+        print(
+            f"Experiment {idx}: {summary['total']} requests at {summary['interval']}s "
+            f"=> success {summary['successful']}/{summary['total']} "
+            f"(elapsed {summary['elapsed_time']:.2f}s)"
+        )
 
 
 if __name__ == "__main__":
