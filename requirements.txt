@@ -11,3 +11,5 @@ fastapi
 uvicorn
 httpx
 memory-profiler
+pandas
+matplotlib
