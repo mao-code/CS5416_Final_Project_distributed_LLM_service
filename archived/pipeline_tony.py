@@ -20,30 +20,9 @@ from sentence_transformers import SentenceTransformer
 from flask import Flask, request, jsonify
 from queue import Queue
 import threading
+import psutil
 import requests
 import msgpack
-import tracemalloc
-import logging
-from memory_profiler import memory_usage
-import multiprocessing as mp
-
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-mp.set_start_method("spawn", force=True)
-
-logging.basicConfig(
-    filename='memory_use.log', 
-    level=logging.INFO, 
-    format='%(asctime)s — %(message)s'
-)
-
-def log_peak_memory(fn):
-    """TODO: add documentation"""
-    def wrapper(*args, **kwargs):
-        peak_mem = memory_usage((fn, args, kwargs), max_usage=True)
-        msg = f"{fn.__name__} peak memory: {peak_mem} MiB"
-        logging.info(msg)
-        return fn(*args, **kwargs)
-    return wrapper
 
 # Read environment variables
 TOTAL_NODES = int(os.environ.get('TOTAL_NODES', 1))
@@ -75,7 +54,6 @@ back_queue = Queue()
 batch_size = 1
 msg = False
 time_metric = False
-memory_metric = False
 
 @dataclass
 class PipelineRequest:
@@ -123,13 +101,18 @@ class FrontPipeline:
         print(f"FAISS index path: {CONFIG['faiss_index_path']}")
         print(f"Documents path: {CONFIG['documents_path']}")
         
+        # Model names
         self.embedding_model_name = 'BAAI/bge-base-en-v1.5'
+        self.reranker_model_name = 'BAAI/bge-reranker-base'
 
-        self.sentenceTransformer_model = SentenceTransformer(self.embedding_model_name).to(self.device)
         self.faiss_index = faiss.read_index(CONFIG['faiss_index_path'])
-    
-    # @log_peak_memory
+        self.sentenceTransformer_model = SentenceTransformer(self.embedding_model_name).to(self.device)
+        self.reranker_tokenizer = AutoTokenizer.from_pretrained(self.reranker_model_name)
+        self.reranker_model = AutoModelForSequenceClassification.from_pretrained(self.reranker_model_name).to(self.device)
+        self.reranker_model.eval()
+   
     def process_batch(self, requests: List[PipelineRequest]) -> List[PipelineResponse]:
+        global next_node
         """
         Main pipeline execution for a batch of requests.
         """
@@ -144,35 +127,50 @@ class FrontPipeline:
         print("="*60)
         for request in requests:
             print(f"- {request.request_id}: {request.query[:50]}...")
-        s_time = time.time()
+        if time_metric:
+            s_time = time.time()
         # Step 1: Generate embeddings
         print("\n[Step 1/7] Generating embeddings for batch...")
         query_embeddings = self._generate_embeddings_batch(queries)
 
-        e_time = time.time()
         if time_metric:
+            e_time = time.time()
             print(e_time - s_time)
-        s_time = time.time()
+            s_time = time.time()
 
         # Step 2: FAISS ANN search
         print("\n[Step 2/7] Performing FAISS ANN search for batch...")
         doc_id_batches = self._faiss_search_batch(query_embeddings)
 
-        e_time = time.time()
         if time_metric:
+            e_time = time.time()
             print(e_time - s_time)
+            s_time = time.time()
 
-        json_result = {
+        # Step 3: Fetch documents from disk
+        print("\n[Step 3/7] Fetching documents for batch...")
+        documents_batch = self._fetch_documents_batch(doc_id_batches)
+
+        if time_metric:
+            e_time = time.time()
+            print(e_time - s_time)
+            s_time = time.time()
+
+        # Step 4: Rerank documents
+        print("\n[Step 4/7] Reranking documents for batch...")
+        reranked_docs_batch = self._rerank_documents_batch(
+            queries,
+            documents_batch
+        )
+        if time_metric:
+            e_time = time.time()
+            print(e_time - s_time)
+        back_queue.put({
             'requests': serialize(requests),
             'start_times': start_times,
             'queries': queries,
-            'doc_id_batches': doc_id_batches
-        }
-
-        if NODE_NUMBER == 1:
-            return json_result
-        else:
-            back_queue.put(json_result)
+            'reranked_docs_batch': reranked_docs_batch
+        })
     
     def _generate_embeddings_batch(self, texts: List[str]) -> np.ndarray:
         """Step 2: Generate embeddings for a batch of queries"""
@@ -195,118 +193,13 @@ class FrontPipeline:
 
         return [row.tolist() for row in indices]
     
-class BackPipeline:
-
-    def __init__(self):
-        self.device = torch.device('cpu')
-        print("BackPipeline")
-        print(f"Initializing pipeline on {self.device}")
-        print(f"Node {NODE_NUMBER}/{TOTAL_NODES}")
-        print(f"FAISS index path: {CONFIG['faiss_index_path']}")
-        print(f"Documents path: {CONFIG['documents_path']}")
-        
-        # Model names
-        self.reranker_model_name = 'BAAI/bge-reranker-base'
-        self.llm_model_name = 'Qwen/Qwen2.5-0.5B-Instruct'
-        self.sentiment_model_name = 'nlptown/bert-base-multilingual-uncased-sentiment'
-        self.safety_model_name = 'unitary/toxic-bert'
-
-        self.reranker_tokenizer = AutoTokenizer.from_pretrained(self.reranker_model_name)
-        self.reranker_model = AutoModelForSequenceClassification.from_pretrained(self.reranker_model_name).to(self.device)
-        self.reranker_model.eval()
-        self.llm_model = AutoModelForCausalLM.from_pretrained(
-            self.llm_model_name,
-            dtype=torch.float16,
-        ).to(self.device)
-        self.llm_model_tokenizer = AutoTokenizer.from_pretrained(self.llm_model_name)
-        self.classifier_analyze = hf_pipeline(
-            "sentiment-analysis",
-            model=self.sentiment_model_name,
-            device=self.device
-        )
-        self.classifier_filter = hf_pipeline(
-            "text-classification",
-            model=self.safety_model_name,
-            device=self.device
-        )
-
-    @log_peak_memory
-    def process_batch(self, requests: List[PipelineRequest], start_times: List[float], queries, doc_id_batches) -> List[PipelineResponse]:
-
-        s_time = time.time()
-        if memory_metric:
-            tracemalloc.start()
-
-        # Step 3: Fetch documents from disk
-        print("\n[Step 3/7] Fetching documents for batch...")
-        documents_batch = self._fetch_documents_batch(doc_id_batches)
-
-        e_time = time.time()
-        if time_metric:
-            print(e_time - s_time)
-        s_time = time.time()
-
-        # Step 4: Rerank documents
-        print("\n[Step 4/7] Reranking documents for batch...")
-        reranked_docs_batch = self._rerank_documents_batch(
-            queries,
-            documents_batch
-        )
-
-        e_time = time.time()
-        if time_metric:
-            print(e_time - s_time)
-        s_time = time.time()
-        
-        # Step 5: Generate LLM responses
-        print("\n[Step 5/7] Generating LLM responses for batch...")
-        responses_text = self._generate_responses_batch(
-            queries,
-            reranked_docs_batch
-        )
-
-        e_time = time.time()
-        if time_metric:
-            print(e_time - s_time)
-        s_time = time.time()
-
-        # Step 6: Sentiment analysis
-        print("\n[Step 6/7] Analyzing sentiment for batch...")
-        sentiments = self._analyze_sentiment_batch(responses_text)
-
-        e_time = time.time()
-        if time_metric:
-            print(e_time - s_time)
-        s_time = time.time()
-
-        # Step 7: Safety filter on responses
-        print("\n[Step 7/7] Applying safety filter to batch...")
-        toxicity_flags = self._filter_response_safety_batch(responses_text)
-        
-        e_time = time.time()
-        if time_metric:
-            print(e_time - s_time)
-
-        responses = []
-        for idx, request in enumerate(requests):
-            processing_time = time.time() - start_times[idx]
-            print(f"\n✓ Request {request.request_id} processed in {processing_time:.2f} seconds")
-            sensitivity_result = "true" if toxicity_flags[idx] else "false"
-            responses.append({
-                'request_id': request.request_id,
-                'generated_response': responses_text[idx],
-                'sentiment': sentiments[idx],
-                'is_toxic': sensitivity_result
-            })
-        
-        return responses
-
     def _fetch_documents_batch(self, doc_id_batches: List[List[int]]) -> List[List[Dict]]:
         """Step 4: Fetch documents for each query in the batch using SQLite"""
         db_path = f"{CONFIG['documents_path']}/documents.db"
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
         doc_cache = {}
+        documents_batch = []
         for doc_ids in doc_id_batches:
             documents: List[dict] = []
             for doc_id in doc_ids:
@@ -331,26 +224,6 @@ class BackPipeline:
             documents_batch.append(documents)
         cursor.close()
         return documents_batch
-
-        # documents_batch = []
-        # for doc_ids in doc_id_batches:
-        #     documents = []
-        #     for doc_id in doc_ids:
-        #         cursor.execute(
-        #             'SELECT doc_id, title, content, category FROM documents WHERE doc_id = ?',
-        #             (doc_id,)
-        #         )
-        #         result = cursor.fetchone()
-        #         if result:
-        #             documents.append({
-        #                 'doc_id': result[0],
-        #                 'title': result[1],
-        #                 'content': result[2],
-        #                 'category': result[3]
-        #             })
-        #     documents_batch.append(documents)
-        # conn.close()
-        # return documents_batch
     
     def _rerank_documents_batch(self, queries: List[str], documents_batch: List[List[Dict]]) -> List[List[Dict]]:
         """Step 5: Rerank retrieved documents for each query in the batch"""
@@ -373,6 +246,84 @@ class BackPipeline:
             doc_scores.sort(key=lambda x: x[1], reverse=True)
             reranked_batches.append([doc for doc, _ in doc_scores])
         return reranked_batches
+
+class BackPipeline:
+
+    def __init__(self):
+        self.device = torch.device('cpu')
+        print("BackPipeline")
+        print(f"Initializing pipeline on {self.device}")
+        print(f"Node {NODE_NUMBER}/{TOTAL_NODES}")
+        print(f"FAISS index path: {CONFIG['faiss_index_path']}")
+        print(f"Documents path: {CONFIG['documents_path']}")
+        
+        # Model names
+        self.llm_model_name = 'Qwen/Qwen2.5-0.5B-Instruct'
+        self.sentiment_model_name = 'nlptown/bert-base-multilingual-uncased-sentiment'
+        self.safety_model_name = 'unitary/toxic-bert'
+
+        self.llm_model = AutoModelForCausalLM.from_pretrained(
+            self.llm_model_name,
+            dtype=torch.float16,
+        ).to(self.device)
+        self.llm_model_tokenizer = AutoTokenizer.from_pretrained(self.llm_model_name)
+        self.classifier_analyze = hf_pipeline(
+            "sentiment-analysis",
+            model=self.sentiment_model_name,
+            device=self.device
+        )
+        self.classifier_filter = hf_pipeline(
+            "text-classification",
+            model=self.safety_model_name,
+            device=self.device
+        )
+    
+    def process_batch(self, requests: List[PipelineRequest], start_times: List[float], queries, reranked_docs_batch) -> List[PipelineResponse]:
+        if time_metric:
+            s_time = time.time()
+
+        # Step 5: Generate LLM responses
+        print("\n[Step 5/7] Generating LLM responses for batch...")
+        responses_text = self._generate_responses_batch(
+            queries,
+            reranked_docs_batch
+        )
+        if time_metric:
+            e_time = time.time()
+            print(e_time - s_time)
+            s_time = time.time()
+
+        # Step 6: Sentiment analysis
+        print("\n[Step 6/7] Analyzing sentiment for batch...")
+        sentiments = self._analyze_sentiment_batch(responses_text)
+
+        if time_metric:
+            e_time = time.time()
+            print(e_time - s_time)
+            s_time = time.time()
+
+        # Step 7: Safety filter on responses
+        print("\n[Step 7/7] Applying safety filter to batch...")
+        toxicity_flags = self._filter_response_safety_batch(responses_text)
+        
+        if time_metric:
+            e_time = time.time()
+            print(e_time - s_time)
+
+        responses = []
+
+        for idx, request in enumerate(requests):
+            processing_time = time.time() - start_times[idx]
+            print(f"\n✓ Request {request.request_id} processed in {processing_time:.2f} seconds")
+            sensitivity_result = "true" if toxicity_flags[idx] else "false"
+            responses.append({
+                'request_id': request.request_id,
+                'generated_response': responses_text[idx],
+                'sentiment': sentiments[idx],
+                'is_toxic': sensitivity_result
+            })
+        
+        return responses
 
     def _generate_responses_batch(self, queries: List[str], documents_batch: List[List[Dict]]) -> List[str]:
         """Step 6: Generate LLM responses for each query in the batch"""
@@ -433,6 +384,7 @@ class BackPipeline:
 # Global pipeline instance
 pipeline = None
 
+@log_peak_memory(node_number=0)
 def running_frontPipeline():
     """Worker thread that processes requests from the queue"""
     global pipeline
@@ -454,12 +406,7 @@ def running_frontPipeline():
                 batch.append(req)
                 request_queue.task_done()
             # Process request
-            def run_and_measure():
-                return pipeline.process_batch(batch)
-
-            peak = memory_usage((run_and_measure, ), max_usage=True)
-            print(f"process_batch peak memory: {peak} MiB")
-            # pipeline.process_batch(batch)
+            pipeline.process_batch(batch)
         except Exception as e:
             print(f"Error processing request: {e}")
             request_queue.task_done()
@@ -477,29 +424,13 @@ def running_backPipeline():
         requests = deserialize(data.get('requests'))
         start_times = data.get('start_times')
         queries = data.get('queries')
-        doc_id_batches = data.get('doc_id_batches')
-        if not requests or not start_times or not queries or not doc_id_batches:
-            return jsonify({'error': 'Missing requests or start_times or queries or doc_id_batches'}), 400
-        if memory_metric:
-            tracemalloc.start()
-        result = pipeline.process_batch(requests, start_times, queries, doc_id_batches)
-        if memory_metric:
-            current, peak = tracemalloc.get_traced_memory()
-            print(f"BackPipeline current memory usage: {current / (1024*1024):.2f} MB")
-            print(f"BackPipeline peak memory usage: {peak / (1024*1024):.2f} MB")
-            tracemalloc.stop()
+        reranked_docs_batch = data.get('reranked_docs_batch')
+        if not requests or not start_times or not queries or not reranked_docs_batch:
+            return jsonify({'error': 'Missing requests or start_times or queries or reranked_docs_batch'}), 400
+        result = pipeline.process_batch(requests, start_times, queries, reranked_docs_batch)
         return jsonify(result)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-
-@app.route('/node1', methods=['POST'])
-def parallel_node_1():
-    global Pipeline
-    data = request.json
-    batch = deserialize(data.get('batch'))
-    result = pipeline.process_batch(batch)
-    return jsonify(result)
-
 
 @app.route('/query', methods=['POST'])
 def handle_query():
@@ -525,7 +456,7 @@ def handle_query():
         })
 
         # Wait for processing (with timeout). Very inefficient - would suggest using a more efficient waiting and timeout mechanism.
-        timeout = 1000  # 5 minutes
+        timeout = 300  # 5 minutes
         start_wait = time.time()
         while True:
             with results_lock:
@@ -551,32 +482,38 @@ def health():
         'total_nodes': TOTAL_NODES
     }), 200
 
+@log_peak_memory(node_number=1)
 def send_to_node_1():
-    """Worker thread that processes requests from the queue"""
-    global pipeline
-    global batch_size
+    global msg
     while True:
         try:
-            batch = []
-            for _ in range(batch_size):
-                request_data = request_queue.get()
-                if request_data is None:  # Shutdown signal
+            if msg:
+                data = back_queue.get()
+                payload = msgpack.packb(data)
+                if payload is None:  # Shutdown signal
                     break
-                req = PipelineRequest(
-                    request_id=request_data['request_id'],
-                    query=request_data['query'],
-                    timestamp=time.time()
-                )
-                batch.append(req)
-                request_queue.task_done()
-            # Process request
-            payload = {'batch': serialize(batch)}
-            result = requests.post(f"http://{NODE_1_IP}/node1", json=payload, timeout=300)
-            back_queue.put(result.json())
+                result = requests.post(f"http://{NODE_1_IP}/backPipeline", data=payload, headers={"Content-Type": "application/msgpack"}, timeout=300)
+            else:
+                payload = back_queue.get()
+                if payload is None:  # Shutdown signal
+                    break
+                result = requests.post(f"http://{NODE_1_IP}/backPipeline", json=payload, timeout=300)
+            responses = result.json()
+            # print("Node 1")
+            # print(responses)
+            with results_lock:
+                for response in responses:
+                    results[response.get('request_id')] = {
+                        'request_id': response.get('request_id'),
+                        'generated_response': response.get('generated_response'),
+                        'sentiment': response.get('sentiment'),
+                        'is_toxic': response.get('is_toxic')
+                    }
+            back_queue.task_done()
         except Exception as e:
-            print(f"Error processing request: {e}")
-            request_queue.task_done()
-        
+                raise ValueError("Failed to send to node 1")
+
+@log_peak_memory(node_number=2)
 def send_to_node_2():
     global msg
     while True:
@@ -593,6 +530,8 @@ def send_to_node_2():
                     break
                 result = requests.post(f"http://{NODE_2_IP}/backPipeline", json=payload, timeout=300)
             responses = result.json()
+            # print("Node 2")
+            # print(responses)
             with results_lock:
                 for response in responses:
                     results[response.get('request_id')] = {
@@ -605,24 +544,10 @@ def send_to_node_2():
         except Exception as e:
             raise ValueError("Failed to send to node 2")
 
-peak_mem_mb = 0
-
 def main():
     """
     Main execution function
     """
-
-    def monitor_memory():
-        global peak_mem_mb
-        process = psutil.Process()
-        while True:
-            mem = process.memory_info().rss / (1024*1024)
-            peak_mem_mb = max(peak_mem_mb, mem)
-            print("peak mem real: ", peak_mem_mb)
-            time.sleep(2)
-    if memory_metric:
-        threading.Thread(target=monitor_memory, daemon=True).start()
-
     global pipeline
     
     print("="*60)
@@ -632,7 +557,7 @@ def main():
     print(f"Node IPs: 0={NODE_0_IP}, 1={NODE_1_IP}, 2={NODE_2_IP}")
     print("\nNOTE: This implementation is deliberately inefficient.")
     print("Your task is to optimize this for a 3-node cluster.\n")
-    if NODE_NUMBER == 0 or NODE_NUMBER == 1:
+    if NODE_NUMBER == 0:
         # Initialize pipeline
         print("Initializing pipeline...")
         pipeline = FrontPipeline()
@@ -643,12 +568,7 @@ def main():
         threading.Thread(target=send_to_node_1, daemon=True).start()
         threading.Thread(target=send_to_node_2, daemon=True).start()
         print("Worker thread started!")
-    elif NODE_NUMBER == 1:
-        # Initialize pipeline
-        print("Initializing pipeline...")
-        pipeline = FrontPipeline()
-        print("Pipeline initialized!")
-    elif NODE_NUMBER == 2:
+    elif NODE_NUMBER == 1 or NODE_NUMBER == 2:
         # Initialize pipeline
         print("Initializing pipeline...")
         pipeline = BackPipeline()
