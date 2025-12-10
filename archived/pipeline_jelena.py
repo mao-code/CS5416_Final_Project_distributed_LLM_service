@@ -172,7 +172,7 @@ class Node1Work:
         self.sentiment_model_name = 'nlptown/bert-base-multilingual-uncased-sentiment'
         self.safety_model_name = 'unitary/toxic-bert'
         self.index = faiss.read_index(CONFIG['faiss_index_path'])
-        self.conn = sqlite3.connect(db_path)
+        self.conn = sqlite3.connect(f"{CONFIG['documents_path']}/documents.db", check_same_thread=False)
         self.tokenizer = AutoTokenizer.from_pretrained(self.reranker_model_name)
         self.model = AutoModelForSequenceClassification.from_pretrained(self.reranker_model_name).to(self.device)
     
@@ -210,7 +210,6 @@ class Node1Work:
     
     def _fetch_documents_batch(self, doc_id_batches: List[List[int]]) -> List[List[Dict]]:
         """Step 4: Fetch documents for each query in the batch using SQLite"""
-        db_path = f"{CONFIG['documents_path']}/documents.db"
         cursor = self.conn.cursor()
         documents_batch = []
         for doc_ids in doc_id_batches:
